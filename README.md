@@ -1,4 +1,4 @@
-# AudioSeparator.NET
+# VocalRemoverSharp
 
 A high-performance audio source separation library for .NET that uses ONNX models to separate vocals and instrumental tracks from mixed audio files.
 
@@ -17,6 +17,16 @@ A high-performance audio source separation library for .NET that uses ONNX model
 - `MathNet.Numerics` - FFT operations
 - `Microsoft.ML.OnnxRuntime` - ONNX model inference
 - `Ownaudio` - Audio I/O operations
+
+## Support My Work
+
+If you find this project helpful, consider buying me a coffee!
+
+<a href="https://www.buymeacoffee.com/ModernMube" 
+    target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/arial-yellow.png" 
+    alt="Buy Me A Coffee" 
+    style="height: 60px !important;width: 217px !important;" >
+ </a>
 
 ## Quick Start
 

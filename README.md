@@ -1,4 +1,4 @@
-# VocalRemoverSharp
+# OwnVocalRemover
 
 A high-performance audio source separation library for .NET that uses ONNX models to separate vocals and instrumental tracks from mixed audio files.
 I've been looking for a good vocal and music separator code in C# for a very long time. Unfortunately, I could only find one in Python, so I decided to create a pure Csharp vocal separator based on the Python code I thought was the best!

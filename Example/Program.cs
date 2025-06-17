@@ -35,7 +35,7 @@ namespace OwnSeparator.BasicConsole
                 await service.InitializeAsync();
 
                 Console.WriteLine("Starting processing...");
-                var result = await service.SeparateAsync(@"D:\Sogorock\Ocam\2025\Unnep\Zorán -Az ünnep (cover)_audio.flac");
+                var result = await service.SeparateAsync(@"input/audio.mp3");
 
                 Console.WriteLine($"Vocals file: {result.VocalsPath}");
                 Console.WriteLine($"Instrumental file: {result.InstrumentalPath}");

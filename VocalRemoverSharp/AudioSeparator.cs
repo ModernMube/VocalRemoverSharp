@@ -909,12 +909,24 @@ namespace OwnSeparator.Core
             int channels = audio.GetLength(0);
             int samples = audio.GetLength(1);
 
+            float maxVal = 0f;
+            for (int ch = 0; ch < audio.GetLength(0); ch++)
+            {
+                for (int i = 0; i < audio.GetLength(1); i++)
+                {
+                    maxVal = Math.Max(maxVal, Math.Abs(audio[ch, i]));
+                }
+            }
+
+            // Normalize +/-1.0 
+            float scale = maxVal > 0.95f ? 0.95f / maxVal : 1.0f;
+
             var interleaved = new float[samples * channels];
             for (int i = 0; i < samples; i++)
             {
                 for (int ch = 0; ch < channels; ch++)
                 {
-                    interleaved[i * channels + ch] = audio[ch, i];
+                    interleaved[i * channels + ch] = audio[ch, i] * scale;
                 }
             }
             Ownaudio.Utilities.WaveFile.WriteFile(filePath, interleaved, sampleRate, channels, 16);

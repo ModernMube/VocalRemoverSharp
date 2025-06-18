@@ -5,7 +5,7 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VocalRemoverSharp", "VocalRemoverSharp\VocalRemoverSharp.csproj", "{1D4CA693-DF03-4A61-A848-B3FFE613F60E}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Example", "Remover\Example.csproj", "{E1A1AD9C-B884-4D24-B452-1A6A9F0B10B6}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Example", "Example\Example.csproj", "{E1A1AD9C-B884-4D24-B452-1A6A9F0B10B6}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

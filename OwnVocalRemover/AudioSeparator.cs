@@ -122,13 +122,44 @@ namespace OwnSeparator.Core
     /// </summary>
     public class AudioStatistics
     {
+        /// <summary>
+        /// Root Mean Square of the original mix audio
+        /// </summary>
         public double MixRMS { get; set; }
+
+        /// <summary>
+        /// Root Mean Square of the extracted vocals
+        /// </summary>
         public double VocalsRMS { get; set; }
+
+        /// <summary>
+        /// Root Mean Square of the extracted instrumental
+        /// </summary>
         public double InstrumentalRMS { get; set; }
+
+        /// <summary>
+        /// Ratio of vocals RMS to mix RMS
+        /// </summary>
         public double VocalsMixRatio { get; set; }
+
+        /// <summary>
+        /// Ratio of instrumental RMS to mix RMS
+        /// </summary>
         public double InstrumentalMixRatio { get; set; }
+
+        /// <summary>
+        /// Sample rate of the audio (Hz)
+        /// </summary>
         public int SampleRate { get; set; }
+
+        /// <summary>
+        /// Number of audio channels
+        /// </summary>
         public int Channels { get; set; }
+
+        /// <summary>
+        /// Total number of audio samples
+        /// </summary>
         public int SampleCount { get; set; }
     }
 
@@ -163,10 +194,29 @@ namespace OwnSeparator.Core
 
         #region Private Fields
 
+        /// <summary>
+        /// Configuration options for separation
+        /// </summary>
         private readonly SeparationOptions _options;
+
+        /// <summary>
+        /// Model parameters for STFT processing
+        /// </summary>
         private ModelParameters _modelParams;
+
+        /// <summary>
+        /// ONNX Runtime session for model inference
+        /// </summary>
         private InferenceSession? _onnxSession;
+
+        /// <summary>
+        /// Flag indicating if the object has been disposed
+        /// </summary>
         private bool _disposed = false;
+
+        /// <summary>
+        /// Target sample rate for audio processing
+        /// </summary>
         private const int TargetSampleRate = 44100;
 
         #endregion
@@ -369,6 +419,9 @@ namespace OwnSeparator.Core
 
         #region Private Methods
 
+        /// <summary>
+        /// Automatically detect model dimensions from ONNX metadata
+        /// </summary>
         private void AutoDetectModelDimensions()
         {
             if (_onnxSession == null) return;
@@ -414,11 +467,21 @@ namespace OwnSeparator.Core
             }
         }
 
+        /// <summary>
+        /// Report progress to subscribers
+        /// </summary>
+        /// <param name="progress">Progress information</param>
         private void ReportProgress(SeparationProgress progress)
         {
             ProgressChanged?.Invoke(this, progress);
         }
 
+        /// <summary>
+        /// Load and prepare audio file for processing
+        /// </summary>
+        /// <param name="filePath">Path to audio file</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        /// <returns>Audio data as 2D array [channels, samples]</returns>
         private async Task<float[,]> LoadAndPrepareAudioAsync(string filePath, CancellationToken cancellationToken)
         {
             return await Task.Run(() =>
@@ -458,6 +521,12 @@ namespace OwnSeparator.Core
             }, cancellationToken);
         }
 
+        /// <summary>
+        /// Process audio using model inference with chunking
+        /// </summary>
+        /// <param name="mix">Input audio mix</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        /// <returns>Separated audio</returns>
         private async Task<float[,]> ProcessAudioAsync(float[,] mix, CancellationToken cancellationToken)
         {
             return await Task.Run(() =>
@@ -475,6 +544,13 @@ namespace OwnSeparator.Core
             }, cancellationToken);
         }
 
+        /// <summary>
+        /// Create audio chunks with overlapping margins
+        /// </summary>
+        /// <param name="mix">Input audio mix</param>
+        /// <param name="chunkSize">Size of each chunk</param>
+        /// <param name="margin">Overlap margin size</param>
+        /// <returns>Dictionary of chunks indexed by position</returns>
         private Dictionary<long, float[,]> CreateChunks(float[,] mix, int chunkSize, int margin)
         {
             var chunks = new Dictionary<long, float[,]>();
@@ -504,6 +580,13 @@ namespace OwnSeparator.Core
             return chunks;
         }
 
+        /// <summary>
+        /// Process all audio chunks through the model
+        /// </summary>
+        /// <param name="chunks">Audio chunks to process</param>
+        /// <param name="margin">Margin size for trimming</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        /// <returns>Concatenated processed audio</returns>
         private float[,] ProcessChunks(Dictionary<long, float[,]> chunks, int margin, CancellationToken cancellationToken)
         {
             var processedChunks = new List<float[,]>();
@@ -542,6 +625,14 @@ namespace OwnSeparator.Core
             return ConcatenateChunks(processedChunks);
         }
 
+        /// <summary>
+        /// Process a single audio chunk through STFT, model inference, and ISTFT
+        /// </summary>
+        /// <param name="mixChunk">Audio chunk to process</param>
+        /// <param name="chunkKey">Position key of the chunk</param>
+        /// <param name="allKeys">All chunk position keys</param>
+        /// <param name="margin">Margin size for trimming</param>
+        /// <returns>Processed audio chunk</returns>
         private float[,] ProcessSingleChunk(float[,] mixChunk, long chunkKey, List<long> allKeys, int margin)
         {
             int nSample = mixChunk.GetLength(1);
@@ -589,6 +680,11 @@ namespace OwnSeparator.Core
             return ApplyMargin(result, chunkKey, allKeys, margin);
         }
 
+        /// <summary>
+        /// Compute Short-Time Fourier Transform (STFT) for audio waves
+        /// </summary>
+        /// <param name="mixWaves">Audio waves to transform</param>
+        /// <returns>STFT tensor in model input format</returns>
         private DenseTensor<float> ComputeStft(float[,,] mixWaves)
         {
             int batchSize = mixWaves.GetLength(0);
@@ -647,6 +743,11 @@ namespace OwnSeparator.Core
             return tensor;
         }
 
+        /// <summary>
+        /// Run model inference on STFT tensor
+        /// </summary>
+        /// <param name="stftTensor">Input STFT tensor</param>
+        /// <returns>Output tensor from model</returns>
         private Tensor<float> RunModelInference(DenseTensor<float> stftTensor)
         {
             if (_onnxSession == null)
@@ -698,6 +799,11 @@ namespace OwnSeparator.Core
             }
         }
 
+        /// <summary>
+        /// Compute Inverse Short-Time Fourier Transform (ISTFT) from spectrum
+        /// </summary>
+        /// <param name="spectrum">Frequency domain spectrum</param>
+        /// <returns>Time domain audio waves</returns>
         private float[,,] ComputeIstft(Tensor<float> spectrum)
         {
             int batchSize = spectrum.Dimensions[0];
@@ -779,6 +885,14 @@ namespace OwnSeparator.Core
             return result;
         }
 
+        /// <summary>
+        /// Extract processed signal from wave frames
+        /// </summary>
+        /// <param name="waves">Processed wave frames</param>
+        /// <param name="nSample">Number of samples to extract</param>
+        /// <param name="trim">Trim size from frame edges</param>
+        /// <param name="genSize">Generation size per frame</param>
+        /// <returns>Extracted signal</returns>
         private float[,] ExtractSignal(float[,,] waves, int nSample, int trim, int genSize)
         {
             int frameCount = waves.GetLength(0);
@@ -803,6 +917,14 @@ namespace OwnSeparator.Core
             return signal;
         }
 
+        /// <summary>
+        /// Apply margin trimming to processed signal
+        /// </summary>
+        /// <param name="signal">Processed signal</param>
+        /// <param name="chunkKey">Current chunk position key</param>
+        /// <param name="allKeys">All chunk position keys</param>
+        /// <param name="margin">Margin size for trimming</param>
+        /// <returns>Margin-trimmed signal</returns>
         private float[,] ApplyMargin(float[,] signal, long chunkKey, List<long> allKeys, int margin)
         {
             int nSample = signal.GetLength(1);
@@ -822,6 +944,11 @@ namespace OwnSeparator.Core
             return result;
         }
 
+        /// <summary>
+        /// Concatenate processed audio chunks into single array
+        /// </summary>
+        /// <param name="chunks">List of processed audio chunks</param>
+        /// <returns>Concatenated audio array</returns>
         private float[,] ConcatenateChunks(List<float[,]> chunks)
         {
             int totalLength = chunks.Sum(c => c.GetLength(1));
@@ -843,6 +970,13 @@ namespace OwnSeparator.Core
             return result;
         }
 
+        /// <summary>
+        /// Calculate RMS and ratio statistics for audio signals
+        /// </summary>
+        /// <param name="mix">Original mix audio</param>
+        /// <param name="vocals">Extracted vocals</param>
+        /// <param name="instrumental">Extracted instrumental</param>
+        /// <returns>Calculated audio statistics</returns>
         private AudioStatistics CalculateStatistics(float[,] mix, float[,] vocals, float[,] instrumental)
         {
             double mixRMS = CalculateRMS(mix);
@@ -862,6 +996,11 @@ namespace OwnSeparator.Core
             };
         }
 
+        /// <summary>
+        /// Calculate Root Mean Square (RMS) value of audio signal
+        /// </summary>
+        /// <param name="audio">Audio signal to analyze</param>
+        /// <returns>RMS value</returns>
         private double CalculateRMS(float[,] audio)
         {
             double sum = 0;
@@ -879,6 +1018,16 @@ namespace OwnSeparator.Core
             return Math.Sqrt(sum / (channels * samples));
         }
 
+        /// <summary>
+        /// Save separated audio results to files
+        /// </summary>
+        /// <param name="filename">Base filename for output files</param>
+        /// <param name="vocals">Vocals audio data</param>
+        /// <param name="instrumental">Instrumental audio data</param>
+        /// <param name="sampleRate">Audio sample rate</param>
+        /// <param name="modelName">Name of the model used</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        /// <returns>Tuple of vocals and instrumental file paths</returns>
         private async Task<(string vocalsPath, string instrumentalPath)> SaveResultsAsync(
             string filename, float[,] vocals, float[,] instrumental, int sampleRate, string modelName, CancellationToken cancellationToken)
         {
@@ -904,6 +1053,12 @@ namespace OwnSeparator.Core
             }, cancellationToken);
         }
 
+        /// <summary>
+        /// Save audio data to WAV file with normalization
+        /// </summary>
+        /// <param name="filePath">Output file path</param>
+        /// <param name="audio">Audio data to save</param>
+        /// <param name="sampleRate">Audio sample rate</param>
         private void SaveAudio(string filePath, float[,] audio, int sampleRate)
         {
             int channels = audio.GetLength(0);
@@ -936,18 +1091,52 @@ namespace OwnSeparator.Core
     }
 
     /// <summary>
-    /// Model parameters (internal use)
+    /// Model parameters for STFT processing (internal use)
     /// </summary>
     internal class ModelParameters
     {
+        /// <summary>
+        /// Number of channels (always 4 for complex stereo)
+        /// </summary>
         public int DimC { get; } = 4;
+
+        /// <summary>
+        /// Frequency dimension size
+        /// </summary>
         public int DimF { get; set; }
+
+        /// <summary>
+        /// Time dimension size (calculated as power of 2)
+        /// </summary>
         public int DimT { get; set; }
+
+        /// <summary>
+        /// FFT size
+        /// </summary>
         public int NFft { get; }
+
+        /// <summary>
+        /// Hop size for STFT
+        /// </summary>
         public int Hop { get; }
+
+        /// <summary>
+        /// Number of frequency bins (NFft/2 + 1)
+        /// </summary>
         public int NBins { get; }
+
+        /// <summary>
+        /// Processing chunk size in samples
+        /// </summary>
         public int ChunkSize { get; set; }
 
+        /// <summary>
+        /// Initialize model parameters
+        /// </summary>
+        /// <param name="dimF">Frequency dimension</param>
+        /// <param name="dimT">Time dimension (as power of 2)</param>
+        /// <param name="nFft">FFT size</param>
+        /// <param name="hop">Hop size (default 1024)</param>
         public ModelParameters(int dimF, int dimT, int nFft, int hop = 1024)
         {
             DimF = dimF;
@@ -1039,6 +1228,7 @@ namespace OwnSeparator.Core
         /// </summary>
         /// <param name="modelPath">Path to ONNX model file</param>
         /// <param name="outputDirectory">Output directory path</param>
+        /// <param name="disableNoiseReduction">Whether to disable noise reduction for speed</param>
         /// <returns>Mobile-optimized AudioSeparationService</returns>
         public static AudioSeparationService CreateMobileOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = false)
         {
@@ -1061,6 +1251,7 @@ namespace OwnSeparator.Core
         /// </summary>
         /// <param name="modelPath">Path to ONNX model file</param>
         /// <param name="outputDirectory">Output directory path</param>
+        /// <param name="disableNoiseReduction">Whether to disable noise reduction</param>
         /// <returns>Desktop-optimized AudioSeparationService</returns>
         public static AudioSeparationService CreateDesktopOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = false)
         {
@@ -1083,6 +1274,7 @@ namespace OwnSeparator.Core
         /// </summary>
         /// <param name="modelPath">Path to ONNX model file</param>
         /// <param name="outputDirectory">Output directory path</param>
+        /// <param name="disableNoiseReduction">Whether to disable noise reduction for faster batch processing</param>
         /// <returns>Batch-optimized AudioSeparationService</returns>
         public static AudioSeparationService CreateBatchOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = true)
         {

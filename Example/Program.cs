@@ -19,9 +19,47 @@ namespace OwnSeparator.BasicConsole
 
             try
             {
+                //Create service optimized for mobile devices (faster processing)
+                SeparationOptions options = new SeparationOptions
+                {
+                    ModelPath = "models/OWN_INST_BEST.ONNX",
+                    OutputDirectory = "output",
+                    ChunkSizeSeconds = 10,
+                    Margin = 22050,
+                    NFft = 4096,
+                    DimT = 7,
+                    DimF = 1024,
+                    DisableNoiseReduction = true
+                };
+
+                ////Create service for batch processing (balanced settings)
+                //SeparationOptions options = new SeparationOptions
+                //{
+                //    ModelPath = "models/OWN_INST_BEST.ONNX",
+                //    OutputDirectory = "output",
+                //    ChunkSizeSeconds = 15,
+                //    Margin = 6144,
+                //    NFft = 4096,
+                //    DimT = 8,
+                //    DimF = 2048,
+                //    DisableNoiseReduction = true
+                //};
+
+                ////Create service optimized for desktop (better quality)
+                //SeparationOptions options = new SeparationOptions
+                //{
+                //    ModelPath = "models/OWN_INST_BEST.ONNX",
+                //    OutputDirectory = "output",
+                //    ChunkSizeSeconds = 25, 
+                //    Margin = 88200,        
+                //    NFft = 8192,           
+                //    DimT = 9,              
+                //    DimF = 4096,
+                //    DisableNoiseReduction = false
+                //};
+
                 // Create service instance
-                var service = AudioSeparationFactory.CreateBatchOptimized(
-                    "models/OWN_INST_DEFAULT.ONNX", "output");
+                var service = new AudioSeparationService( options);
 
                 // Subscribe to events
                 service.ProgressChanged += (s, progress) =>

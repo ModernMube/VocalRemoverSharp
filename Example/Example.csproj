@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\VocalRemoverSharp\VocalRemoverSharp.csproj" />
+    <ProjectReference Include="..\OwnVocalRemover\OwnVocalRemover.csproj" />
   </ItemGroup>
 
 </Project>

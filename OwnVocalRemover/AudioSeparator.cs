@@ -5,7 +5,8 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 using Ownaudio;
 using Ownaudio.Engines;
 using Ownaudio.Sources;
-
+using System.Collections.Concurrent;
+using Microsoft.Extensions.ObjectPool;
 
 namespace OwnSeparator.Core
 {
@@ -164,7 +165,104 @@ namespace OwnSeparator.Core
     }
 
     /// <summary>
-    /// Main audio separation service
+    /// Thread-safe ONNX session wrapper for pooling
+    /// </summary>
+    public class PooledInferenceSession : IDisposable
+    {
+        public InferenceSession Session { get; }
+        public bool IsDispose { get; set; } = false;
+
+        public PooledInferenceSession(string modelPath, SessionOptions options)
+        {
+            Session = new InferenceSession(modelPath, options);
+        }
+
+        public void Dispose()
+        {
+            if (!IsDispose)
+            {
+                Session?.Dispose();
+                IsDispose = true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Object pool policy for ONNX sessions
+    /// </summary>
+    public class InferenceSessionPoolPolicy : IPooledObjectPolicy<PooledInferenceSession>
+    {
+        private readonly string _modelPath;
+        private readonly SessionOptions _sessionOptions;
+
+        public InferenceSessionPoolPolicy(string modelPath, SessionOptions sessionOptions)
+        {
+            _modelPath = modelPath;
+            _sessionOptions = sessionOptions;
+        }
+
+        public PooledInferenceSession Create()
+        {
+            return new PooledInferenceSession(_modelPath, _sessionOptions);
+        }
+
+        public bool Return(PooledInferenceSession obj)
+        {
+            return !obj.IsDispose;
+        }
+    }
+
+    /// <summary>
+    /// Chunk processing result with position information
+    /// </summary>
+    public class ChunkProcessingResult
+    {
+        public long Position { get; set; }
+        public float[,] ProcessedAudio { get; set; }
+        public int OriginalOrder { get; set; }
+        public Exception? Error { get; set; }
+
+        public ChunkProcessingResult(long position, float[,] processedAudio, int originalOrder)
+        {
+            Position = position;
+            ProcessedAudio = processedAudio;
+            OriginalOrder = originalOrder;
+        }
+    }
+
+    /// <summary>
+    /// Parallel chunk processing configuration
+    /// </summary>
+    public class ParallelProcessingOptions
+    {
+        /// <summary>
+        /// Maximum degree of parallelism (0 = auto-detect)
+        /// </summary>
+        public int MaxDegreeOfParallelism { get; set; } = 0;
+
+        /// <summary>
+        /// ONNX session pool size
+        /// </summary>
+        public int SessionPoolSize { get; set; } = 0;
+
+        /// <summary>
+        /// Enable memory pressure monitoring
+        /// </summary>
+        public bool EnableMemoryPressureMonitoring { get; set; } = true;
+
+        /// <summary>
+        /// Memory pressure threshold (bytes)
+        /// </summary>
+        public long MemoryPressureThreshold { get; set; } = 2_000_000_000; // 2GB
+
+        /// <summary>
+        /// Chunk queue capacity
+        /// </summary>
+        public int ChunkQueueCapacity { get; set; } = 10;
+    }
+
+    /// <summary>
+    /// Main audio separation service with parallel processing support
     /// </summary>
     public class AudioSeparationService : IDisposable
     {
@@ -205,9 +303,34 @@ namespace OwnSeparator.Core
         private ModelParameters _modelParams;
 
         /// <summary>
-        /// ONNX Runtime session for model inference
+        /// ONNX Runtime session for model inference (traditional mode)
         /// </summary>
         private InferenceSession? _onnxSession;
+
+        /// <summary>
+        /// ONNX session pool for parallel processing
+        /// </summary>
+        private ObjectPool<PooledInferenceSession>? _sessionPool;
+
+        /// <summary>
+        /// Parallel processing configuration
+        /// </summary>
+        private ParallelProcessingOptions? _parallelOptions;
+
+        /// <summary>
+        /// Semaphore for controlling concurrent session usage
+        /// </summary>
+        private SemaphoreSlim? _sessionSemaphore;
+
+        /// <summary>
+        /// Memory monitoring timer
+        /// </summary>
+        private Timer? _memoryMonitorTimer;
+
+        /// <summary>
+        /// Current memory pressure flag
+        /// </summary>
+        private volatile bool _isMemoryPressureHigh = false;
 
         /// <summary>
         /// Flag indicating if the object has been disposed
@@ -242,7 +365,7 @@ namespace OwnSeparator.Core
         #region Public Methods
 
         /// <summary>
-        /// Initialize the ONNX model session and auto-detect model dimensions
+        /// Initialize the ONNX model session and auto-detect model dimensions (traditional mode)
         /// </summary>
         /// <param name="cancellationToken">Cancellation token</param>
         public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -280,6 +403,70 @@ namespace OwnSeparator.Core
         }
 
         /// <summary>
+        /// Initialize parallel processing with session pool
+        /// </summary>
+        /// <param name="parallelOptions">Parallel processing configuration</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        public async Task InitializeParallelAsync(
+            ParallelProcessingOptions? parallelOptions = null,
+            CancellationToken cancellationToken = default)
+        {
+            _parallelOptions = parallelOptions ?? GetDefaultParallelOptions();
+
+            await Task.Run(() =>
+            {
+                if (!File.Exists(_options.ModelPath))
+                {
+                    throw new FileNotFoundException($"Model file not found: {_options.ModelPath}");
+                }
+
+                // Create session options
+                var sessionOptions = new SessionOptions
+                {
+                    LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING
+                };
+
+                try
+                {
+                    sessionOptions.AppendExecutionProvider_CUDA();
+                    Console.WriteLine("CUDA execution provider enabled for parallel processing.");
+                }
+                catch
+                {
+                    sessionOptions.AppendExecutionProvider_CPU();
+                    Console.WriteLine("Using CPU execution provider for parallel processing.");
+                }
+
+                // Create session pool
+                var poolPolicy = new InferenceSessionPoolPolicy(_options.ModelPath, sessionOptions);
+                _sessionPool = new DefaultObjectPool<PooledInferenceSession>(
+                    poolPolicy, _parallelOptions.SessionPoolSize);
+
+                // Create semaphore for session control
+                _sessionSemaphore = new SemaphoreSlim(
+                    _parallelOptions.SessionPoolSize,
+                    _parallelOptions.SessionPoolSize);
+
+                // Initialize one session for auto-detection
+                using var testSession = _sessionPool.Get();
+                _onnxSession = testSession.Session;
+                AutoDetectModelDimensions();
+                _onnxSession = null; // Clear reference, use pool from now on
+
+                // Start memory monitoring if enabled
+                if (_parallelOptions.EnableMemoryPressureMonitoring)
+                {
+                    StartMemoryMonitoring();
+                }
+
+                Console.WriteLine($"Parallel processing initialized: " +
+                    $"Sessions={_parallelOptions.SessionPoolSize}, " +
+                    $"MaxParallelism={_parallelOptions.MaxDegreeOfParallelism}");
+
+            }, cancellationToken);
+        }
+
+        /// <summary>
         /// Separate audio file into vocals and instrumental tracks
         /// </summary>
         /// <param name="inputFilePath">Input audio file path</param>
@@ -287,8 +474,9 @@ namespace OwnSeparator.Core
         /// <returns>Separation result</returns>
         public async Task<SeparationResult> SeparateAsync(string inputFilePath, CancellationToken cancellationToken = default)
         {
-            if (_onnxSession == null)
-                throw new InvalidOperationException("Service not initialized. Call InitializeAsync first.");
+            // Check if either traditional or parallel processing is initialized
+            if (_onnxSession == null && _sessionPool == null)
+                throw new InvalidOperationException("Service not initialized. Call InitializeAsync or InitializeParallelAsync first.");
 
             if (!File.Exists(inputFilePath))
                 throw new FileNotFoundException($"Input file not found: {inputFilePath}");
@@ -316,7 +504,10 @@ namespace OwnSeparator.Core
                     OverallProgress = 10
                 });
 
-                var separated = await ProcessAudioAsync(mix, cancellationToken);
+                // Use parallel processing if available, otherwise fall back to traditional
+                var separated = _sessionPool != null
+                    ? await ProcessAudioParallelAsync(mix, cancellationToken)
+                    : await ProcessAudioAsync(mix, cancellationToken);
 
                 ReportProgress(new SeparationProgress
                 {
@@ -408,16 +599,13 @@ namespace OwnSeparator.Core
         /// </summary>
         public void Dispose()
         {
-            if (!_disposed)
-            {
-                _onnxSession?.Dispose();
-                _disposed = true;
-            }
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
 
         #endregion
 
-        #region Private Methods
+        #region Private Methods - Initialization
 
         /// <summary>
         /// Automatically detect model dimensions from ONNX metadata
@@ -468,6 +656,61 @@ namespace OwnSeparator.Core
         }
 
         /// <summary>
+        /// Get default parallel processing options based on system capabilities
+        /// </summary>
+        /// <returns>Default parallel processing options</returns>
+        private ParallelProcessingOptions GetDefaultParallelOptions()
+        {
+            int cpuCount = Environment.ProcessorCount;
+            long totalMemory = GC.GetTotalMemory(false);
+
+            return new ParallelProcessingOptions
+            {
+                MaxDegreeOfParallelism = Math.Max(1, cpuCount / 2), // Conservative approach
+                SessionPoolSize = Math.Min(4, Math.Max(2, cpuCount / 2)), // 2-4 sessions
+                EnableMemoryPressureMonitoring = totalMemory > 1_000_000_000, // Only if >1GB available
+                MemoryPressureThreshold = totalMemory / 2, // 50% of available memory
+                ChunkQueueCapacity = cpuCount * 2
+            };
+        }
+
+        /// <summary>
+        /// Start memory monitoring for adaptive parallelism
+        /// </summary>
+        private void StartMemoryMonitoring()
+        {
+            _memoryMonitorTimer = new Timer(MonitorMemoryPressure, null,
+                TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5));
+        }
+
+        /// <summary>
+        /// Monitor memory pressure and adjust processing accordingly
+        /// </summary>
+        /// <param name="state">Timer state (unused)</param>
+        private void MonitorMemoryPressure(object? state)
+        {
+            try
+            {
+                long currentMemory = GC.GetTotalMemory(false);
+                _isMemoryPressureHigh = currentMemory > _parallelOptions!.MemoryPressureThreshold;
+
+                if (_isMemoryPressureHigh)
+                {
+                    // Force garbage collection under memory pressure
+                    GC.Collect(1, GCCollectionMode.Optimized);
+                }
+            }
+            catch
+            {
+                // Ignore monitoring errors
+            }
+        }
+
+        #endregion
+
+        #region Private Methods - Audio Processing
+
+        /// <summary>
         /// Report progress to subscribers
         /// </summary>
         /// <param name="progress">Progress information</param>
@@ -499,7 +742,7 @@ namespace OwnSeparator.Core
                 SourceManager.OutputEngineOptions = _audioEngineOptions;
                 SourceManager _manager = SourceManager.Instance;
 
-                _manager.AddOutputSource( filePath );
+                _manager.AddOutputSource(filePath);
 
                 List<float> samples = _manager.Sources[0].GetFloatAudioData(new TimeSpan(0)).ToList();
 
@@ -522,7 +765,7 @@ namespace OwnSeparator.Core
         }
 
         /// <summary>
-        /// Process audio using model inference with chunking
+        /// Process audio using model inference with chunking (traditional mode)
         /// </summary>
         /// <param name="mix">Input audio mix</param>
         /// <param name="cancellationToken">Cancellation token</param>
@@ -543,6 +786,40 @@ namespace OwnSeparator.Core
                 return ProcessChunks(chunks, margin, cancellationToken);
             }, cancellationToken);
         }
+
+        /// <summary>
+        /// Process audio chunks in parallel
+        /// </summary>
+        /// <param name="mix">Input audio mix</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        /// <returns>Processed audio</returns>
+        private async Task<float[,]> ProcessAudioParallelAsync(
+            float[,] mix, CancellationToken cancellationToken)
+        {
+            if (_sessionPool == null)
+            {
+                throw new InvalidOperationException(
+                    "Parallel processing not initialized. Call InitializeParallelAsync first.");
+            }
+
+            return await Task.Run(() =>
+            {
+                int samples = mix.GetLength(1);
+                int margin = _options.Margin;
+                int chunkSize = _options.ChunkSizeSeconds * TargetSampleRate;
+
+                if (margin == 0) throw new ArgumentException("Margin cannot be zero!");
+                if (chunkSize != 0 && margin > chunkSize) margin = chunkSize;
+                if (_options.ChunkSizeSeconds == 0 || samples < chunkSize) chunkSize = samples;
+
+                var chunks = CreateChunksWithOrder(mix, chunkSize, margin);
+                return ProcessChunksParallel(chunks, margin, cancellationToken);
+            }, cancellationToken);
+        }
+
+        #endregion
+
+        #region Private Methods - Chunk Processing
 
         /// <summary>
         /// Create audio chunks with overlapping margins
@@ -581,7 +858,46 @@ namespace OwnSeparator.Core
         }
 
         /// <summary>
-        /// Process all audio chunks through the model
+        /// Create chunks with ordering information for parallel processing
+        /// </summary>
+        /// <param name="mix">Input audio mix</param>
+        /// <param name="chunkSize">Size of each chunk</param>
+        /// <param name="margin">Overlap margin size</param>
+        /// <returns>Dictionary of chunks with position and order info</returns>
+        private Dictionary<long, (float[,] audio, int order)> CreateChunksWithOrder(
+            float[,] mix, int chunkSize, int margin)
+        {
+            var chunks = new Dictionary<long, (float[,], int)>();
+            int samples = mix.GetLength(1);
+            long counter = -1;
+            int order = 0;
+
+            for (long skip = 0; skip < samples; skip += chunkSize)
+            {
+                counter++;
+                long sMargin = counter == 0 ? 0 : margin;
+                long end = Math.Min(skip + chunkSize + margin, samples);
+                long start = skip - sMargin;
+                int segmentLength = (int)(end - start);
+
+                var segment = new float[2, segmentLength];
+                for (int ch = 0; ch < 2; ch++)
+                {
+                    for (int i = 0; i < segmentLength; i++)
+                    {
+                        segment[ch, i] = mix[ch, start + i];
+                    }
+                }
+
+                chunks[skip] = (segment, order++);
+                if (end == samples) break;
+            }
+
+            return chunks;
+        }
+
+        /// <summary>
+        /// Process all audio chunks through the model (traditional mode)
         /// </summary>
         /// <param name="chunks">Audio chunks to process</param>
         /// <param name="margin">Margin size for trimming</param>
@@ -626,7 +942,143 @@ namespace OwnSeparator.Core
         }
 
         /// <summary>
-        /// Process a single audio chunk through STFT, model inference, and ISTFT
+        /// Process chunks in parallel with proper ordering and error handling
+        /// </summary>
+        /// <param name="chunks">Chunks to process with order information</param>
+        /// <param name="margin">Margin size for trimming</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        /// <returns>Concatenated processed audio</returns>
+        private float[,] ProcessChunksParallel(
+            Dictionary<long, (float[,] audio, int order)> chunks,
+            int margin,
+            CancellationToken cancellationToken)
+        {
+            var keys = chunks.Keys.ToList();
+            int totalChunks = chunks.Count;
+            var results = new ConcurrentDictionary<int, ChunkProcessingResult>();
+            var exceptions = new ConcurrentQueue<Exception>();
+
+            ReportProgress(new SeparationProgress
+            {
+                Status = "Processing chunks in parallel...",
+                TotalChunks = totalChunks,
+                ProcessedChunks = 0,
+                OverallProgress = 20
+            });
+
+            // Determine optimal parallelism
+            int maxParallelism = GetOptimalParallelism();
+            var parallelOptions = new ParallelOptions
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = maxParallelism
+            };
+
+            // Process chunks in parallel
+            var processedCount = 0;
+            var lockObject = new object();
+
+            try
+            {
+                Parallel.ForEach(chunks, parallelOptions, kvp =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Check memory pressure and throttle if needed
+                    if (_isMemoryPressureHigh)
+                    {
+                        Thread.Sleep(100); // Brief pause during memory pressure
+                    }
+
+                    try
+                    {
+                        var result = ProcessSingleChunkParallel(
+                            kvp.Value.audio, kvp.Key, keys, margin, kvp.Value.order);
+
+                        results[kvp.Value.order] = result;
+
+                        // Update progress thread-safely
+                        lock (lockObject)
+                        {
+                            processedCount++;
+                            double chunkProgress = (double)processedCount / totalChunks * 100;
+
+                            ReportProgress(new SeparationProgress
+                            {
+                                Status = $"Processing chunk {processedCount}/{totalChunks}",
+                                ChunkProgress = chunkProgress,
+                                ProcessedChunks = processedCount,
+                                TotalChunks = totalChunks,
+                                OverallProgress = 20 + (chunkProgress * 0.6)
+                            });
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Enqueue(ex);
+                        var errorResult = new ChunkProcessingResult(kvp.Key, new float[2, 0], kvp.Value.order)
+                        {
+                            Error = ex
+                        };
+                        results[kvp.Value.order] = errorResult;
+                    }
+                });
+            }
+            catch (AggregateException aggEx)
+            {
+                foreach (var ex in aggEx.InnerExceptions)
+                {
+                    exceptions.Enqueue(ex);
+                }
+            }
+
+            // Check for errors
+            if (!exceptions.IsEmpty)
+            {
+                var firstError = exceptions.TryDequeue(out var error) ? error :
+                    new Exception("Unknown error during parallel processing");
+                throw new AggregateException("Errors occurred during parallel chunk processing",
+                    exceptions.ToArray().Concat(new[] { firstError }));
+            }
+
+            // Sort results by original order and concatenate
+            var orderedResults = results.Values
+                .OrderBy(r => r.OriginalOrder)
+                .Where(r => r.Error == null)
+                .Select(r => r.ProcessedAudio)
+                .ToList();
+
+            return ConcatenateChunks(orderedResults);
+        }
+
+        /// <summary>
+        /// Get optimal parallelism degree considering current system state
+        /// </summary>
+        /// <returns>Optimal degree of parallelism</returns>
+        private int GetOptimalParallelism()
+        {
+            int baseDegree = _parallelOptions?.MaxDegreeOfParallelism ?? 0;
+
+            if (baseDegree == 0)
+            {
+                baseDegree = Math.Max(1, Environment.ProcessorCount / 2);
+            }
+
+            // Reduce parallelism under memory pressure
+            if (_isMemoryPressureHigh)
+            {
+                return Math.Max(1, baseDegree / 2);
+            }
+
+            return baseDegree;
+        }
+
+        #endregion
+
+        #region Private Methods - Single Chunk Processing
+
+        /// <summary>
+        /// Process a single audio chunk through STFT, model inference, and ISTFT (traditional mode)
         /// </summary>
         /// <param name="mixChunk">Audio chunk to process</param>
         /// <param name="chunkKey">Position key of the chunk</param>
@@ -679,6 +1131,109 @@ namespace OwnSeparator.Core
             var result = ExtractSignal(resultWaves, nSample, trim, genSize);
             return ApplyMargin(result, chunkKey, allKeys, margin);
         }
+
+        /// <summary>
+        /// Process single chunk with session pooling
+        /// </summary>
+        /// <param name="mixChunk">Audio chunk to process</param>
+        /// <param name="chunkKey">Position key of the chunk</param>
+        /// <param name="allKeys">All chunk position keys</param>
+        /// <param name="margin">Margin size for trimming</param>
+        /// <param name="order">Original order for sorting</param>
+        /// <returns>Processing result with order information</returns>
+        private ChunkProcessingResult ProcessSingleChunkParallel(
+            float[,] mixChunk, long chunkKey, List<long> allKeys, int margin, int order)
+        {
+            if (_sessionPool == null || _sessionSemaphore == null)
+            {
+                throw new InvalidOperationException("Session pool not initialized");
+            }
+
+            // Wait for available session
+            _sessionSemaphore.Wait();
+            PooledInferenceSession? pooledSession = null;
+
+            try
+            {
+                pooledSession = _sessionPool.Get();
+
+                // Use the pooled session for processing
+                var processedAudio = ProcessSingleChunkWithSession(
+                    mixChunk, chunkKey, allKeys, margin, pooledSession.Session);
+
+                return new ChunkProcessingResult(chunkKey, processedAudio, order);
+            }
+            finally
+            {
+                // Return session to pool
+                if (pooledSession != null)
+                {
+                    _sessionPool.Return(pooledSession);
+                }
+                _sessionSemaphore.Release();
+            }
+        }
+
+        /// <summary>
+        /// Process single chunk with specific ONNX session
+        /// </summary>
+        /// <param name="mixChunk">Audio chunk to process</param>
+        /// <param name="chunkKey">Position key of the chunk</param>
+        /// <param name="allKeys">All chunk position keys</param>
+        /// <param name="margin">Margin size for trimming</param>
+        /// <param name="session">ONNX session to use</param>
+        /// <returns>Processed audio chunk</returns>
+        private float[,] ProcessSingleChunkWithSession(
+            float[,] mixChunk, long chunkKey, List<long> allKeys, int margin, InferenceSession session)
+        {
+            int nSample = mixChunk.GetLength(1);
+            int trim = _modelParams.NFft / 2;
+            int genSize = _modelParams.ChunkSize - 2 * trim;
+
+            if (genSize <= 0)
+                throw new ArgumentException($"Invalid genSize: {genSize}. Check FFT parameters.");
+
+            // Padding
+            int pad = genSize - (nSample % genSize);
+            if (nSample % genSize == 0) pad = 0;
+
+            var mixPadded = new float[2, trim + nSample + pad + trim];
+            for (int ch = 0; ch < 2; ch++)
+            {
+                for (int i = 0; i < nSample; i++)
+                {
+                    mixPadded[ch, trim + i] = mixChunk[ch, i];
+                }
+            }
+
+            int frameCount = (nSample + pad) / genSize;
+            var mixWaves = new float[frameCount, 2, _modelParams.ChunkSize];
+
+            for (int i = 0; i < frameCount; i++)
+            {
+                int offset = i * genSize;
+                for (int ch = 0; ch < 2; ch++)
+                {
+                    for (int j = 0; j < _modelParams.ChunkSize; j++)
+                    {
+                        mixWaves[i, ch, j] = mixPadded[ch, offset + j];
+                    }
+                }
+            }
+
+            // STFT -> Model -> ISTFT with specific session
+            var stftTensor = ComputeStft(mixWaves);
+            var outputTensor = RunModelInferenceWithSession(stftTensor, session);
+            var resultWaves = ComputeIstft(outputTensor);
+
+            // Extract and apply margin
+            var result = ExtractSignal(resultWaves, nSample, trim, genSize);
+            return ApplyMargin(result, chunkKey, allKeys, margin);
+        }
+
+        #endregion
+
+        #region Private Methods - STFT/ISTFT Processing
 
         /// <summary>
         /// Compute Short-Time Fourier Transform (STFT) for audio waves
@@ -741,62 +1296,6 @@ namespace OwnSeparator.Core
                 }
             }
             return tensor;
-        }
-
-        /// <summary>
-        /// Run model inference on STFT tensor
-        /// </summary>
-        /// <param name="stftTensor">Input STFT tensor</param>
-        /// <returns>Output tensor from model</returns>
-        private Tensor<float> RunModelInference(DenseTensor<float> stftTensor)
-        {
-            if (_onnxSession == null)
-                throw new InvalidOperationException("ONNX session not initialized");
-
-            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input", stftTensor) };
-
-            if (!_options.DisableNoiseReduction)
-            {
-                // Denoise logic
-                var stftTensorNeg = new DenseTensor<float>(stftTensor.Dimensions);
-                for (int idx = 0; idx < stftTensor.Length; idx++)
-                {
-                    stftTensorNeg.SetValue(idx, -stftTensor.GetValue(idx));
-                }
-                var inputsNeg = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input", stftTensorNeg) };
-
-                using var outputs = _onnxSession.Run(inputs);
-                using var outputsNeg = _onnxSession.Run(inputsNeg);
-
-                var specPred = outputs.First().AsTensor<float>();
-                var specPredNeg = outputsNeg.First().AsTensor<float>();
-
-                var result = new DenseTensor<float>(specPred.Dimensions);
-
-                for (int b = 0; b < specPred.Dimensions[0]; b++)
-                    for (int c = 0; c < specPred.Dimensions[1]; c++)
-                        for (int f = 0; f < specPred.Dimensions[2]; f++)
-                            for (int t = 0; t < specPred.Dimensions[3]; t++)
-                            {
-                                float val = -specPredNeg[b, c, f, t] * 0.5f + specPred[b, c, f, t] * 0.5f;
-                                ((DenseTensor<float>)result)[b, c, f, t] = val;
-                            }
-
-                return result;
-            }
-            else
-            {
-                using var outputs = _onnxSession.Run(inputs);
-                var result = outputs.First().AsTensor<float>();
-
-                // Create a copy to avoid disposal issues
-                var resultCopy = new DenseTensor<float>(result.Dimensions);
-                for (int i = 0; i < result.Length; i++)
-                {
-                    resultCopy.SetValue(i, result.GetValue(i));
-                }
-                return resultCopy;
-            }
         }
 
         /// <summary>
@@ -885,6 +1384,81 @@ namespace OwnSeparator.Core
             return result;
         }
 
+        #endregion
+
+        #region Private Methods - Model Inference
+
+        /// <summary>
+        /// Run model inference on STFT tensor (traditional mode)
+        /// </summary>
+        /// <param name="stftTensor">Input STFT tensor</param>
+        /// <returns>Output tensor from model</returns>
+        private Tensor<float> RunModelInference(DenseTensor<float> stftTensor)
+        {
+            if (_onnxSession == null)
+                throw new InvalidOperationException("ONNX session not initialized");
+
+            return RunModelInferenceWithSession(stftTensor, _onnxSession);
+        }
+
+        /// <summary>
+        /// Run model inference with specific session
+        /// </summary>
+        /// <param name="stftTensor">Input STFT tensor</param>
+        /// <param name="session">ONNX session to use</param>
+        /// <returns>Output tensor from model</returns>
+        private Tensor<float> RunModelInferenceWithSession(DenseTensor<float> stftTensor, InferenceSession session)
+        {
+            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input", stftTensor) };
+
+            if (!_options.DisableNoiseReduction)
+            {
+                // Denoise logic with specific session
+                var stftTensorNeg = new DenseTensor<float>(stftTensor.Dimensions);
+                for (int idx = 0; idx < stftTensor.Length; idx++)
+                {
+                    stftTensorNeg.SetValue(idx, -stftTensor.GetValue(idx));
+                }
+                var inputsNeg = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input", stftTensorNeg) };
+
+                using var outputs = session.Run(inputs);
+                using var outputsNeg = session.Run(inputsNeg);
+
+                var specPred = outputs.First().AsTensor<float>();
+                var specPredNeg = outputsNeg.First().AsTensor<float>();
+
+                var result = new DenseTensor<float>(specPred.Dimensions);
+
+                for (int b = 0; b < specPred.Dimensions[0]; b++)
+                    for (int c = 0; c < specPred.Dimensions[1]; c++)
+                        for (int f = 0; f < specPred.Dimensions[2]; f++)
+                            for (int t = 0; t < specPred.Dimensions[3]; t++)
+                            {
+                                float val = -specPredNeg[b, c, f, t] * 0.5f + specPred[b, c, f, t] * 0.5f;
+                                ((DenseTensor<float>)result)[b, c, f, t] = val;
+                            }
+
+                return result;
+            }
+            else
+            {
+                using var outputs = session.Run(inputs);
+                var result = outputs.First().AsTensor<float>();
+
+                // Create a copy to avoid disposal issues
+                var resultCopy = new DenseTensor<float>(result.Dimensions);
+                for (int i = 0; i < result.Length; i++)
+                {
+                    resultCopy.SetValue(i, result.GetValue(i));
+                }
+                return resultCopy;
+            }
+        }
+
+        #endregion
+
+        #region Private Methods - Signal Processing
+
         /// <summary>
         /// Extract processed signal from wave frames
         /// </summary>
@@ -969,6 +1543,10 @@ namespace OwnSeparator.Core
 
             return result;
         }
+
+        #endregion
+
+        #region Private Methods - Statistics and File I/O
 
         /// <summary>
         /// Calculate RMS and ratio statistics for audio signals
@@ -1085,6 +1663,33 @@ namespace OwnSeparator.Core
                 }
             }
             Ownaudio.Utilities.WaveFile.WriteFile(filePath, interleaved, sampleRate, channels, 16);
+        }
+
+        #endregion
+
+        #region Dispose Pattern
+
+        /// <summary>
+        /// Dispose resources
+        /// </summary>
+        /// <param name="disposing">True if disposing</param>
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed && disposing)
+            {
+                _memoryMonitorTimer?.Dispose();
+                _sessionSemaphore?.Dispose();
+
+                // Dispose all sessions in pool
+                if (_sessionPool is IDisposable disposablePool)
+                {
+                    disposablePool.Dispose();
+                }
+
+                // Dispose original session if it exists
+                _onnxSession?.Dispose();
+                _disposed = true;
+            }
         }
 
         #endregion
@@ -1290,6 +1895,121 @@ namespace OwnSeparator.Core
                 DisableNoiseReduction = disableNoiseReduction // Faster processing for batch
             };
             return new AudioSeparationService(options);
+        }
+
+        /// <summary>
+        /// Create service with parallel processing optimized for system capabilities
+        /// </summary>
+        /// <param name="modelPath">Path to ONNX model file</param>
+        /// <param name="outputDirectory">Output directory path</param>
+        /// <param name="systemCores">Number of CPU cores</param>
+        /// <param name="availableMemoryGB">Available memory in GB</param>
+        /// <returns>System-optimized AudioSeparationService with parallel options</returns>
+        public static (AudioSeparationService service, ParallelProcessingOptions parallelOptions) CreateSystemOptimized(
+            string modelPath, string outputDirectory, int systemCores, double availableMemoryGB)
+        {
+            SeparationOptions separationOptions;
+            ParallelProcessingOptions parallelOptions;
+
+            if (availableMemoryGB > 16 && systemCores >= 12)
+            {
+                // High-end workstation
+                separationOptions = new SeparationOptions
+                {
+                    ModelPath = modelPath,
+                    OutputDirectory = outputDirectory,
+                    ChunkSizeSeconds = 30,
+                    Margin = 88200,
+                    NFft = 8192,
+                    DimT = 9,
+                    DimF = 4096,
+                    DisableNoiseReduction = false
+                };
+
+                parallelOptions = new ParallelProcessingOptions
+                {
+                    MaxDegreeOfParallelism = Math.Min(8, systemCores),
+                    SessionPoolSize = Math.Min(6, systemCores / 2),
+                    EnableMemoryPressureMonitoring = true,
+                    MemoryPressureThreshold = (long)(availableMemoryGB * 0.7 * 1024 * 1024 * 1024),
+                    ChunkQueueCapacity = systemCores * 2
+                };
+            }
+            else if (availableMemoryGB > 8 && systemCores >= 8)
+            {
+                // High-end desktop
+                separationOptions = new SeparationOptions
+                {
+                    ModelPath = modelPath,
+                    OutputDirectory = outputDirectory,
+                    ChunkSizeSeconds = 20,
+                    Margin = 66150,
+                    NFft = 6144,
+                    DimT = 8,
+                    DimF = 3072,
+                    DisableNoiseReduction = false
+                };
+
+                parallelOptions = new ParallelProcessingOptions
+                {
+                    MaxDegreeOfParallelism = Math.Min(6, systemCores * 3 / 4),
+                    SessionPoolSize = Math.Min(4, systemCores / 2),
+                    EnableMemoryPressureMonitoring = true,
+                    MemoryPressureThreshold = (long)(availableMemoryGB * 0.6 * 1024 * 1024 * 1024),
+                    ChunkQueueCapacity = systemCores
+                };
+            }
+            else if (availableMemoryGB > 4 && systemCores >= 4)
+            {
+                // Mid-range system
+                separationOptions = new SeparationOptions
+                {
+                    ModelPath = modelPath,
+                    OutputDirectory = outputDirectory,
+                    ChunkSizeSeconds = 15,
+                    Margin = 44100,
+                    NFft = 6144,
+                    DimT = 8,
+                    DimF = 2048,
+                    DisableNoiseReduction = true
+                };
+
+                parallelOptions = new ParallelProcessingOptions
+                {
+                    MaxDegreeOfParallelism = Math.Min(4, systemCores / 2),
+                    SessionPoolSize = 3,
+                    EnableMemoryPressureMonitoring = true,
+                    MemoryPressureThreshold = (long)(availableMemoryGB * 0.5 * 1024 * 1024 * 1024),
+                    ChunkQueueCapacity = systemCores
+                };
+            }
+            else
+            {
+                // Low-end or mobile system
+                separationOptions = new SeparationOptions
+                {
+                    ModelPath = modelPath,
+                    OutputDirectory = outputDirectory,
+                    ChunkSizeSeconds = 10,
+                    Margin = 22050,
+                    NFft = 4096,
+                    DimT = 7,
+                    DimF = 1024,
+                    DisableNoiseReduction = true
+                };
+
+                parallelOptions = new ParallelProcessingOptions
+                {
+                    MaxDegreeOfParallelism = Math.Max(1, systemCores / 2),
+                    SessionPoolSize = 2,
+                    EnableMemoryPressureMonitoring = true,
+                    MemoryPressureThreshold = (long)(availableMemoryGB * 0.4 * 1024 * 1024 * 1024),
+                    ChunkQueueCapacity = Math.Max(2, systemCores)
+                };
+            }
+
+            var service = new AudioSeparationService(separationOptions);
+            return (service, parallelOptions);
         }
     }
 }

@@ -58,17 +58,14 @@ namespace OwnSeparator.BasicConsole
                 //    DisableNoiseReduction = false
                 //};
 
-                // Create service instance
-                var service = new AudioSeparationService( options);
+                var service = new AudioSeparationService(options);
 
-                // Subscribe to events
                 service.ProgressChanged += (s, progress) =>
                     Console.WriteLine($"{progress.Status}: {progress.OverallProgress:F1}%");
 
                 service.ProcessingCompleted += (s, result) =>
                     Console.WriteLine($"Completed: {result.ProcessingTime}");
 
-                // Initialize and process
                 Console.WriteLine("Initializing...");
                 await service.InitializeAsync();
 
@@ -78,7 +75,6 @@ namespace OwnSeparator.BasicConsole
                 Console.WriteLine($"Vocals file: {result.VocalsPath}");
                 Console.WriteLine($"Instrumental file: {result.InstrumentalPath}");
 
-                // Release resources
                 service.Dispose();
             }
             catch (FileNotFoundException ex)

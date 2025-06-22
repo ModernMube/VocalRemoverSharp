@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
+    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="9.0.6" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.22.0" />
     <PackageReference Include="OwnAudioSharp" Version="0.31.45" />
   </ItemGroup>

@@ -8,6 +8,8 @@ Unfortunately, I could only find such code in Python, so I decided to create a p
 
 - **ONNX Model Support**: Works with pre-trained ONNX models for audio separation
 - **GPU Acceleration**: Automatic CUDA support with CPU fallback
+- **Parallel Processing**: Multi-threaded chunk processing with session pooling
+- **Memory Management**: Adaptive memory pressure monitoring
 - **Chunked Processing**: Handles large files by processing in configurable chunks
 - **Noise Reduction**: Optional denoising for improved separation quality
 - **Batch Processing**: Process multiple files efficiently
@@ -19,6 +21,7 @@ Unfortunately, I could only find such code in Python, so I decided to create a p
 - `MathNet.Numerics` - FFT operations
 - `Microsoft.ML.OnnxRuntime` - ONNX model inference
 - `Ownaudio` - Audio I/O operations
+- `Microsoft.Extensions.ObjectPool` - Session pooling for parallel processing
 
 ## Support My Work
 
@@ -32,6 +35,8 @@ If you find this project helpful, consider buying me a coffee!
 
 ## Quick Start
 
+### Basic Usage (Traditional Mode)
+
 ```csharp
 // Basic usage with included model
 var service = AudioSeparationExtensions.CreateDefaultService("models/OWN_INST_DEFAULT.onnx");
@@ -40,6 +45,25 @@ await service.InitializeAsync();
 var result = await service.SeparateAsync("input_song.wav");
 Console.WriteLine($"Vocals: {result.VocalsPath}");
 Console.WriteLine($"Instrumental: {result.InstrumentalPath}");
+
+service.Dispose();
+```
+
+### Parallel Processing Mode
+
+```csharp
+// Parallel processing for faster performance
+var service = AudioSeparationExtensions.CreateDefaultService("models/OWN_INST_DEFAULT.onnx");
+
+var parallelOptions = new ParallelProcessingOptions
+{
+    MaxDegreeOfParallelism = 4,
+    SessionPoolSize = 3,
+    EnableMemoryPressureMonitoring = true
+};
+
+await service.InitializeParallelAsync(parallelOptions);
+var result = await service.SeparateAsync("input_song.wav");
 
 service.Dispose();
 ```
@@ -57,9 +81,17 @@ service.Dispose();
 - **DimT**: Temporal dimension parameter (default: 8)
 - **DimF**: Frequency dimension parameter (default: 2048)
 
+### ParallelProcessingOptions
+
+- **MaxDegreeOfParallelism**: Maximum concurrent chunks (0 = auto-detect)
+- **SessionPoolSize**: Number of ONNX sessions in pool (0 = auto-detect)
+- **EnableMemoryPressureMonitoring**: Monitor memory usage (default: true)
+- **MemoryPressureThreshold**: Memory threshold in bytes (default: 2GB)
+- **ChunkQueueCapacity**: Queue capacity for chunks (default: 10)
+
 ## Usage Examples
 
-### Custom Configuration
+### Custom Configuration with Parallel Processing
 
 ```csharp
 var options = new SeparationOptions
@@ -70,8 +102,30 @@ var options = new SeparationOptions
     DisableNoiseReduction = false
 };
 
+var parallelOptions = new ParallelProcessingOptions
+{
+    MaxDegreeOfParallelism = 6,
+    SessionPoolSize = 4,
+    EnableMemoryPressureMonitoring = true,
+    MemoryPressureThreshold = 3_000_000_000 // 3GB
+};
+
 var service = new AudioSeparationService(options);
-await service.InitializeAsync();
+await service.InitializeParallelAsync(parallelOptions);
+```
+
+### System-Optimized Configuration
+
+```csharp
+// Automatically configure based on system capabilities
+var (service, parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(
+    "models/model.onnx", 
+    "output", 
+    Environment.ProcessorCount, 
+    8.0 // 8GB available memory
+);
+
+await service.InitializeParallelAsync(parallelOptions);
 ```
 
 ### Progress Monitoring
@@ -80,6 +134,7 @@ await service.InitializeAsync();
 service.ProgressChanged += (sender, progress) =>
 {
     Console.WriteLine($"Progress: {progress.OverallProgress:F1}% - {progress.Status}");
+    Console.WriteLine($"Chunks: {progress.ProcessedChunks}/{progress.TotalChunks}");
 };
 
 service.ProcessingStarted += (sender, file) =>
@@ -114,6 +169,7 @@ var service = AudioSeparationFactory.CreateMobileOptimized(
     "output", 
     disableNoiseReduction: true
 );
+await service.InitializeAsync(); // Traditional mode for mobile
 ```
 
 ### Desktop Optimized (Better Quality)
@@ -122,6 +178,18 @@ var service = AudioSeparationFactory.CreateDesktopOptimized(
     "models/model.onnx", 
     "output"
 );
+await service.InitializeParallelAsync(); // Parallel mode for desktop
+```
+
+### System-Optimized with Parallel Processing
+```csharp
+var (service, parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(
+    "models/model.onnx", 
+    "output",
+    systemCores: Environment.ProcessorCount,
+    availableMemoryGB: 16.0
+);
+await service.InitializeParallelAsync(parallelOptions);
 ```
 
 ### Choosing the Right Model
@@ -145,6 +213,21 @@ var service = AudioSeparationExtensions.CreateDefaultService("models/OWN_KAR.onn
 ```csharp
 var service = AudioSeparationExtensions.CreateDefaultService("models/custom_mdxnet.onnx");
 ```
+
+## Processing Modes
+
+### Traditional Mode
+- Single-threaded processing
+- Lower memory usage
+- Suitable for mobile/low-end devices
+- Initialize with `InitializeAsync()`
+
+### Parallel Processing Mode
+- Multi-threaded chunk processing
+- Higher performance on multi-core systems
+- Session pooling for better resource utilization
+- Memory pressure monitoring
+- Initialize with `InitializeParallelAsync()`
 
 ## Supported Audio Formats
 
@@ -173,14 +256,33 @@ catch (InvalidOperationException ex)
 {
     Console.WriteLine($"Service error: {ex.Message}");
 }
+catch (AggregateException ex) when (ex.InnerExceptions.Any())
+{
+    Console.WriteLine("Parallel processing errors occurred:");
+    foreach (var innerEx in ex.InnerExceptions)
+    {
+        Console.WriteLine($"- {innerEx.Message}");
+    }
+}
 ```
 
 ## Performance Tips
 
-1. **GPU Acceleration**: Ensure CUDA is available for faster processing
-2. **Chunk Size**: Adjust `ChunkSizeSeconds` based on available memory
-3. **Noise Reduction**: Disable for faster processing in batch scenarios
-4. **Memory**: Larger chunks require more memory but may improve quality
+1. **Processing Mode**: Use parallel processing on multi-core systems
+2. **GPU Acceleration**: Ensure CUDA is available for faster processing
+3. **Chunk Size**: Adjust `ChunkSizeSeconds` based on available memory
+4. **Session Pool**: Increase `SessionPoolSize` for better parallel performance
+5. **Memory Management**: Enable memory pressure monitoring for large files
+6. **Noise Reduction**: Disable for faster processing in batch scenarios
+
+## Memory Management
+
+The parallel processing mode includes adaptive memory management:
+
+- **Memory Pressure Monitoring**: Automatically detects high memory usage
+- **Garbage Collection**: Forces GC under memory pressure
+- **Throttling**: Reduces parallelism when memory is constrained
+- **Session Pooling**: Efficient reuse of ONNX sessions
 
 ## Statistics and Analysis
 
@@ -191,6 +293,7 @@ var stats = result.Statistics;
 Console.WriteLine($"Vocals RMS: {stats.VocalsRMS:F4}");
 Console.WriteLine($"Instrumental RMS: {stats.InstrumentalRMS:F4}");
 Console.WriteLine($"Sample Rate: {stats.SampleRate} Hz");
+Console.WriteLine($"Processing Time: {result.ProcessingTime}");
 ```
 
 ## Included Models
@@ -221,8 +324,9 @@ The library comes with three pre-trained models:
 // Using the default model
 var defaultService = AudioSeparationExtensions.CreateDefaultService("models/OWN_INST_DEFAULT.onnx");
 
-// Using the best quality model
+// Using the best quality model with parallel processing
 var bestService = AudioSeparationExtensions.CreateDefaultService("models/OWN_INST_BEST.onnx");
+await bestService.InitializeParallelAsync();
 
 // Using the karaoke model
 var karaokeService = AudioSeparationExtensions.CreateDefaultService("models/OWN_KAR.onnx");
@@ -233,9 +337,9 @@ var karaokeService = AudioSeparationExtensions.CreateDefaultService("models/OWN_
 The library is fully compatible with any MDXNET model:
 
 ```csharp
-// Using custom MDXNET model
+// Using custom MDXNET model with parallel processing
 var mdxService = AudioSeparationExtensions.CreateDefaultService("models/my_mdxnet_model.onnx");
-await mdxService.InitializeAsync(); // Auto-detects model parameters
+await mdxService.InitializeParallelAsync(); // Auto-detects model parameters
 ```
 
 ## Model Requirements
@@ -249,14 +353,49 @@ ONNX models should:
 
 ## Thread Safety
 
-The `AudioSeparationService` is **not thread-safe**. Create separate instances for concurrent processing or use proper synchronization.
+- The `AudioSeparationService` is **not thread-safe** for concurrent operations on the same instance
+- Parallel processing is handled internally and is thread-safe
+- Create separate instances for concurrent processing of different files
+- Session pooling ensures safe concurrent access to ONNX models
+
+## Best Practices
+
+### For Single Files
+```csharp
+using var service = AudioSeparationExtensions.CreateDefaultService("models/model.onnx");
+await service.InitializeParallelAsync();
+var result = await service.SeparateAsync("song.wav");
+```
+
+### For Batch Processing
+```csharp
+var service = AudioSeparationFactory.CreateBatchOptimized("models/model.onnx", "output");
+await service.InitializeParallelAsync();
+
+var files = Directory.GetFiles("input", "*.wav");
+var results = await service.SeparateMultipleAsync(files);
+
+service.Dispose();
+```
+
+### For System-Specific Optimization
+```csharp
+var (service, options) = AudioSeparationFactory.CreateSystemOptimized(
+    "models/model.onnx", 
+    "output",
+    Environment.ProcessorCount,
+    GC.GetTotalMemory(false) / (1024.0 * 1024.0 * 1024.0) // Available memory in GB
+);
+await service.InitializeParallelAsync(options);
+```
 
 ## Disposal
 
-Always dispose the service to free ONNX resources:
+Always dispose the service to free ONNX resources and session pools:
 
 ```csharp
 using var service = new AudioSeparationService(options);
+await service.InitializeParallelAsync();
 // Use service...
-// Automatically disposed
+// Automatically disposed, including session pool cleanup
 ```

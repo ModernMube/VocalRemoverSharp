@@ -17,48 +17,13 @@ namespace OwnSeparator.BasicConsole
             Console.WriteLine("OwnSeparator Audio Separation");
             Console.WriteLine("=========================");
 
+            string audioFilePath = @"input/audio.mp3";
+            string modelFilePath = @"models/OWN_INST_BEST.ONNX";
+            string outputDirectory = @"output";
+
             try
             {
-                //Create service optimized for mobile devices (faster processing)
-                SeparationOptions options = new SeparationOptions
-                {
-                    ModelPath = "models/OWN_INST_BEST.ONNX",
-                    OutputDirectory = "output",
-                    ChunkSizeSeconds = 10,
-                    Margin = 22050,
-                    NFft = 4096,
-                    DimT = 7,
-                    DimF = 1024,
-                    DisableNoiseReduction = true
-                };
-
-                ////Create service for batch processing (balanced settings)
-                //SeparationOptions options = new SeparationOptions
-                //{
-                //    ModelPath = "models/OWN_INST_BEST.ONNX",
-                //    OutputDirectory = "output",
-                //    ChunkSizeSeconds = 15,
-                //    Margin = 6144,
-                //    NFft = 4096,
-                //    DimT = 8,
-                //    DimF = 2048,
-                //    DisableNoiseReduction = true
-                //};
-
-                ////Create service optimized for desktop (better quality)
-                //SeparationOptions options = new SeparationOptions
-                //{
-                //    ModelPath = "models/OWN_INST_BEST.ONNX",
-                //    OutputDirectory = "output",
-                //    ChunkSizeSeconds = 25, 
-                //    Margin = 88200,        
-                //    NFft = 8192,           
-                //    DimT = 9,              
-                //    DimF = 4096,
-                //    DisableNoiseReduction = false
-                //};
-
-                var service = new AudioSeparationService(options);
+                (var service, var ParallelOptions) = AudioSeparationFactory.CreateSystemOptimized(modelFilePath, outputDirectory);
 
                 service.ProgressChanged += (s, progress) =>
                     Console.WriteLine($"{progress.Status}: {progress.OverallProgress:F1}%");
@@ -70,7 +35,7 @@ namespace OwnSeparator.BasicConsole
                 await service.InitializeAsync();
 
                 Console.WriteLine("Starting processing...");
-                var result = await service.SeparateAsync(@"input/audio.mp3");
+                var result = await service.SeparateAsync(audioFilePath);
 
                 Console.WriteLine($"Vocals file: {result.VocalsPath}");
                 Console.WriteLine($"Instrumental file: {result.InstrumentalPath}");

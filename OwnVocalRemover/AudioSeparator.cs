@@ -7,6 +7,7 @@ using Ownaudio.Engines;
 using Ownaudio.Sources;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.ObjectPool;
+using System.Diagnostics;
 
 namespace OwnSeparator.Core
 {
@@ -1906,19 +1907,25 @@ namespace OwnSeparator.Core
         /// <param name="availableMemoryGB">Available memory in GB</param>
         /// <returns>System-optimized AudioSeparationService with parallel options</returns>
         public static (AudioSeparationService service, ParallelProcessingOptions parallelOptions) CreateSystemOptimized(
-            string modelPath, string outputDirectory, int systemCores, double availableMemoryGB)
+            string modelPath, string outputDirectory)
         {
             SeparationOptions separationOptions;
             ParallelProcessingOptions parallelOptions;
 
-            if (availableMemoryGB > 16 && systemCores >= 12)
+            // Analyze system capabilities
+            var systemInfo = AnalyzeSystemCapabilities();
+            var availableMemoryGB = systemInfo.AvailableMemory / (1024.0 * 1024 * 1024);
+            var systemCores = systemInfo.CpuCores;
+
+            if (systemInfo.HasHighMemory && systemInfo.HasManyCores)
             {
                 // High-end workstation
+                Debug.WriteLine("High-end workstation detected. Using maximum settings for quality.");
                 separationOptions = new SeparationOptions
                 {
                     ModelPath = modelPath,
                     OutputDirectory = outputDirectory,
-                    ChunkSizeSeconds = 30,
+                    ChunkSizeSeconds = 25,
                     Margin = 88200,
                     NFft = 8192,
                     DimT = 9,
@@ -1928,40 +1935,38 @@ namespace OwnSeparator.Core
 
                 parallelOptions = new ParallelProcessingOptions
                 {
-                    MaxDegreeOfParallelism = Math.Min(8, systemCores),
-                    SessionPoolSize = Math.Min(6, systemCores / 2),
-                    EnableMemoryPressureMonitoring = true,
-                    MemoryPressureThreshold = (long)(availableMemoryGB * 0.7 * 1024 * 1024 * 1024),
-                    ChunkQueueCapacity = systemCores * 2
+                    MaxDegreeOfParallelism = Math.Min(8, systemInfo.CpuCores),
+                    SessionPoolSize = Math.Min(6, systemInfo.CpuCores / 2),
+                    MemoryPressureThreshold = systemInfo.EstimatedTotalRAM / 3, // Use up to 1/3 of RAM
                 };
             }
-            else if (availableMemoryGB > 8 && systemCores >= 8)
+            else if (systemInfo.HasHighMemory)
             {
                 // High-end desktop
+                Debug.WriteLine("High-end desktop detected. Using optimized settings for performance.");
                 separationOptions = new SeparationOptions
                 {
                     ModelPath = modelPath,
                     OutputDirectory = outputDirectory,
                     ChunkSizeSeconds = 20,
-                    Margin = 66150,
+                    Margin = 44100,
                     NFft = 6144,
                     DimT = 8,
-                    DimF = 3072,
-                    DisableNoiseReduction = false
+                    DimF = 2048,
+                    DisableNoiseReduction = true
                 };
 
                 parallelOptions = new ParallelProcessingOptions
                 {
-                    MaxDegreeOfParallelism = Math.Min(6, systemCores * 3 / 4),
-                    SessionPoolSize = Math.Min(4, systemCores / 2),
-                    EnableMemoryPressureMonitoring = true,
-                    MemoryPressureThreshold = (long)(availableMemoryGB * 0.6 * 1024 * 1024 * 1024),
-                    ChunkQueueCapacity = systemCores
+                    MaxDegreeOfParallelism = Math.Min(4, systemInfo.CpuCores),
+                    SessionPoolSize = 3,
+                    MemoryPressureThreshold = systemInfo.EstimatedTotalRAM / 4
                 };
             }
-            else if (availableMemoryGB > 4 && systemCores >= 4)
+            else if (systemInfo.HasManyCores)
             {
                 // Mid-range system
+                Debug.WriteLine("Mid-range system detected. Using balanced settings for quality and performance.");
                 separationOptions = new SeparationOptions
                 {
                     ModelPath = modelPath,
@@ -1976,16 +1981,15 @@ namespace OwnSeparator.Core
 
                 parallelOptions = new ParallelProcessingOptions
                 {
-                    MaxDegreeOfParallelism = Math.Min(4, systemCores / 2),
-                    SessionPoolSize = 3,
-                    EnableMemoryPressureMonitoring = true,
-                    MemoryPressureThreshold = (long)(availableMemoryGB * 0.5 * 1024 * 1024 * 1024),
-                    ChunkQueueCapacity = systemCores
+                    MaxDegreeOfParallelism = Math.Min(4, systemInfo.CpuCores / 2),
+                    SessionPoolSize = Math.Min(3, systemInfo.CpuCores / 3),
+                    MemoryPressureThreshold = systemInfo.EstimatedTotalRAM / 2 // Conservative
                 };
             }
             else
             {
                 // Low-end or mobile system
+                Debug.WriteLine("Low-end or mobile system detected. Using minimal settings for speed.");
                 separationOptions = new SeparationOptions
                 {
                     ModelPath = modelPath,
@@ -2000,16 +2004,50 @@ namespace OwnSeparator.Core
 
                 parallelOptions = new ParallelProcessingOptions
                 {
-                    MaxDegreeOfParallelism = Math.Max(1, systemCores / 2),
+                    MaxDegreeOfParallelism = Math.Max(1, systemInfo.CpuCores / 2),
                     SessionPoolSize = 2,
-                    EnableMemoryPressureMonitoring = true,
-                    MemoryPressureThreshold = (long)(availableMemoryGB * 0.4 * 1024 * 1024 * 1024),
-                    ChunkQueueCapacity = Math.Max(2, systemCores)
+                    MemoryPressureThreshold = systemInfo.AvailableMemory * 2
                 };
             }
 
             var service = new AudioSeparationService(separationOptions);
             return (service, parallelOptions);
         }
+
+        /// <summary>
+        /// Analyze system capabilities for optimal configuration
+        /// </summary>
+        /// <returns>System information structure</returns>
+        private static SystemInfo AnalyzeSystemCapabilities()
+        {
+            var gcMemoryInfo = GC.GetGCMemoryInfo();
+            var totalMemory = gcMemoryInfo.TotalAvailableMemoryBytes;
+            var cpuCount = Environment.ProcessorCount;
+
+            var estimatedTotalRAM =  (long)Math.Round(totalMemory * 0.75, 0); // Rough estimation
+
+            return new SystemInfo
+            {
+                CpuCores = cpuCount,
+                AvailableMemory = totalMemory,
+                EstimatedTotalRAM = estimatedTotalRAM,
+                Is64Bit = Environment.Is64BitProcess,
+                HasHighMemory = estimatedTotalRAM > 18_000_000_000, // >8GB
+                HasManyCores = cpuCount >= 8
+            };
+        }
+    }
+
+    /// <summary>
+    /// System information structure for optimization decisions
+    /// </summary>
+    public struct SystemInfo
+    {
+        public int CpuCores { get; set; }
+        public long AvailableMemory { get; set; }
+        public long EstimatedTotalRAM { get; set; }
+        public bool Is64Bit { get; set; }
+        public bool HasHighMemory { get; set; }
+        public bool HasManyCores { get; set; }
     }
 }

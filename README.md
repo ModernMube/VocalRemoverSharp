@@ -179,9 +179,7 @@ await service.InitializeParallelAsync(); // Parallel mode for desktop
 ```csharp
 var (service, parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(
     "models/model.onnx", 
-    "output",
-    systemCores: Environment.ProcessorCount,
-    availableMemoryGB: 16.0
+    "output"
 );
 await service.InitializeParallelAsync(parallelOptions);
 ```

@@ -118,7 +118,7 @@ await service.InitializeParallelAsync(parallelOptions);
 
 ```csharp
 // Automatically configure based on system capabilitiesvar 
-var (service, parallelOptions) = AudioSeparationFactory.CreateSystemOptimized("models/my_model.onnx", "output");
+var (service, parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(@"models/OWN_INST_BEST.ONNX", @"output");
 await service.InitializeParallelAsync(parallelOptions);
 ```
 

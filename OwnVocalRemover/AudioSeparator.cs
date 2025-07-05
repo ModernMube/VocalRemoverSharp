@@ -741,11 +741,11 @@ namespace OwnSeparator.Core
                 );
 
                 SourceManager.OutputEngineOptions = _audioEngineOptions;
-                SourceManager _manager = SourceManager.Instance;
+                SourceManager manager = SourceManager.Instance;
 
-                _manager.AddOutputSource(filePath);
+                manager.AddOutputSource(filePath, "audiosource");
 
-                List<float> samples = _manager.Sources[0].GetFloatAudioData(new TimeSpan(0)).ToList();
+                List<float> samples = manager["audiosource"].GetFloatAudioData(new TimeSpan(0)).ToList();
 
                 int channels = (int)_audioEngineOptions.Channels;
                 int frameCount = samples.Count / channels;

@@ -17,7 +17,7 @@ namespace OwnSeparator.BasicConsole
             Console.WriteLine("OwnSeparator Audio Separation");
             Console.WriteLine("=========================");
 
-            string audioFilePath = @"input/audio.mp3";
+            string audioFilePath = @"path/audio.mp3";
             string modelFilePath = @"models/OWN_INST_BEST.ONNX";
             string outputDirectory = @"output";
 

@@ -14,6 +14,12 @@
     <PackageReference Include="OwnAudioSharp" Version="0.43.19" />
   </ItemGroup>
 
+	<ItemGroup>
+		<EmbeddedResource Include="default.onnx" />
+		<EmbeddedResource Include="best.onnx" />
+		<EmbeddedResource Include="karaoke.onnx" />
+	</ItemGroup>
+
   <ItemGroup>
     <None Update="models\OWN_INST_BEST.onnx">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

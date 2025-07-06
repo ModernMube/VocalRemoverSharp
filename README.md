@@ -39,7 +39,7 @@ If you find this project helpful, consider buying me a coffee!
 
 ```csharp
 // Basic usage with included model
-var service = AudioSeparationExtensions.CreateDefaultService("models/OWN_INST_DEFAULT.onnx");
+var service = AudioSeparationExtensions.CreateDefaultService(InternalModel.Default);
 await service.InitializeAsync();
 
 var result = await service.SeparateAsync("input_song.wav");
@@ -53,7 +53,7 @@ service.Dispose();
 
 ```csharp
 // Parallel processing for faster performance
-var service = AudioSeparationExtensions.CreateDefaultService("models/OWN_INST_DEFAULT.onnx");
+var service = AudioSeparationExtensions.CreateDefaultService(InternalModel.Default);
 
 var parallelOptions = new ParallelProcessingOptions
 {
@@ -96,7 +96,8 @@ service.Dispose();
 ```csharp
 var options = new SeparationOptions
 {
-    ModelPath = "models/my_model.onnx",
+    ModelPath = "",
+	Model = InternalModel.Default,
     OutputDirectory = "output",
     ChunkSizeSeconds = 20,
     DisableNoiseReduction = false
@@ -118,7 +119,7 @@ await service.InitializeParallelAsync(parallelOptions);
 
 ```csharp
 // Automatically configure based on system capabilitiesvar 
-var (service, parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(@"models/OWN_INST_BEST.ONNX", @"output");
+var (service, parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(InternalModel.Default, @"output");
 await service.InitializeParallelAsync(parallelOptions);
 ```
 
@@ -159,7 +160,7 @@ foreach (var result in results)
 ### Mobile Optimized (Faster)
 ```csharp
 var service = AudioSeparationFactory.CreateMobileOptimized(
-    "models/model.onnx", 
+    InternalModel.Default, 
     "output", 
     disableNoiseReduction: true
 );
@@ -169,7 +170,7 @@ await service.InitializeAsync(); // Traditional mode for mobile
 ### Desktop Optimized (Better Quality)
 ```csharp
 var service = AudioSeparationFactory.CreateDesktopOptimized(
-    "models/model.onnx", 
+    InternalModel.Default, 
     "output"
 );
 await service.InitializeParallelAsync(); // Parallel mode for desktop
@@ -178,7 +179,7 @@ await service.InitializeParallelAsync(); // Parallel mode for desktop
 ### System-Optimized with Parallel Processing
 ```csharp
 var (service, parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(
-    "models/model.onnx", 
+    InternalModel.Default, 
     "output"
 );
 await service.InitializeParallelAsync(parallelOptions);
@@ -186,19 +187,19 @@ await service.InitializeParallelAsync(parallelOptions);
 
 ### Choosing the Right Model
 
-**For general use**: Start with `OWN_INST_DEFAULT.onnx`
+**For general use**: Start with `default model`
 ```csharp
-var service = AudioSeparationFactory.CreateBatchOptimized("models/OWN_INST_DEFAULT.onnx", "output");
+var service = AudioSeparationFactory.CreateBatchOptimized(InternalModel.Default, "output");
 ```
 
-**For best quality**: Use `OWN_INST_BEST.onnx` with desktop settings
+**For best quality**: Use `best model` with desktop settings
 ```csharp
-var service = AudioSeparationFactory.CreateDesktopOptimized("models/OWN_INST_BEST.onnx", "output");
+var service = AudioSeparationFactory.CreateDesktopOptimized(InternalModel.Best, "output");
 ```
 
-**For karaoke creation**: Use `OWN_KAR.onnx`
+**For karaoke creation**: Use `karaoke model`
 ```csharp
-var service = AudioSeparationExtensions.CreateDefaultService("models/OWN_KAR.onnx");
+var service = AudioSeparationExtensions.CreateDefaultService(InternalModel.Karaoke);
 ```
 
 **For custom MDXNET models**: Any compatible model works
@@ -292,19 +293,19 @@ Console.WriteLine($"Processing Time: {result.ProcessingTime}");
 
 The library comes with three pre-trained models:
 
-### OWN_INST_DEFAULT.onnx
+### DEFAULT model
 - **Type**: Basic instrumental separation
 - **Quality**: Good baseline performance
 - **Use case**: General purpose separation, fastest processing
 - **Output**: Clean vocals and instrumental tracks
 
-### OWN_INST_BEST.onnx  
+### BEST model  
 - **Type**: High-quality instrumental separation
 - **Quality**: Superior separation accuracy
 - **Use case**: When quality is more important than speed
 - **Output**: High-fidelity vocals and instrumental tracks
 
-### OWN_KAR.onnx
+### Karaoke model
 - **Type**: Karaoke model (lead vocal removal)
 - **Quality**: Specialized for karaoke creation
 - **Use case**: Remove lead vocals while preserving backing vocals
@@ -314,14 +315,14 @@ The library comes with three pre-trained models:
 
 ```csharp
 // Using the default model
-var defaultService = AudioSeparationExtensions.CreateDefaultService("models/OWN_INST_DEFAULT.onnx");
+var defaultService = AudioSeparationExtensions.CreateDefaultService(InternalModel.Default);
 
 // Using the best quality model with parallel processing
-var bestService = AudioSeparationExtensions.CreateDefaultService("models/OWN_INST_BEST.onnx");
+var bestService = AudioSeparationExtensions.CreateDefaultService(InternalModel.Best);
 await bestService.InitializeParallelAsync();
 
 // Using the karaoke model
-var karaokeService = AudioSeparationExtensions.CreateDefaultService("models/OWN_KAR.onnx");
+var karaokeService = AudioSeparationExtensions.CreateDefaultService(InternalModel.Karaoke);
 ```
 
 ## MDXNET Model Support
@@ -354,14 +355,14 @@ ONNX models should:
 
 ### For Single Files
 ```csharp
-using var service = AudioSeparationExtensions.CreateDefaultService("models/model.onnx");
+using var service = AudioSeparationExtensions.CreateDefaultService(InternalModel.Default);
 await service.InitializeParallelAsync();
 var result = await service.SeparateAsync("song.wav");
 ```
 
 ### For Batch Processing
 ```csharp
-var service = AudioSeparationFactory.CreateBatchOptimized("models/model.onnx", "output");
+var service = AudioSeparationFactory.CreateBatchOptimized(InternalModel.Default, "output");
 await service.InitializeParallelAsync();
 
 var files = Directory.GetFiles("input", "*.wav");
@@ -373,7 +374,7 @@ service.Dispose();
 ### For System-Specific Optimization
 ```csharp
 var (service, options) = AudioSeparationFactory.CreateSystemOptimized(
-    "models/model.onnx", 
+    InternalModel.Default, 
     "output",
     Environment.ProcessorCount,
     GC.GetTotalMemory(false) / (1024.0 * 1024.0 * 1024.0) // Available memory in GB

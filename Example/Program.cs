@@ -17,13 +17,12 @@ namespace OwnSeparator.BasicConsole
             Console.WriteLine("OwnSeparator Audio Separation");
             Console.WriteLine("=========================");
 
-            string audioFilePath = @"path/audio.mp3";
-            string modelFilePath = @"models/OWN_INST_BEST.ONNX";
+            string audioFilePath = @"path/to/audio.mp3";
             string outputDirectory = @"output";
 
             try
             {
-                (var service, var ParallelOptions) = AudioSeparationFactory.CreateSystemOptimized(modelFilePath, outputDirectory);
+                (var service, var ParallelOptions) = AudioSeparationFactory.CreateSystemOptimized(InternalModel.Best, outputDirectory);
 
                 service.ProgressChanged += (s, progress) =>
                     Console.WriteLine($"{progress.Status}: {progress.OverallProgress:F1}%");

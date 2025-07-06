@@ -18,13 +18,12 @@ namespace OwnSeparator.BasicConsole
             Console.WriteLine("OwnSeparator Audio Separation - Parallel Version");
             Console.WriteLine("===============================================");
 
-            string audioFilePath = @"input/audio.mp3";
-            string modelFilePath = @"models/OWN_INST_BEST.ONNX";
+            string audioFilePath = @"path/to/audio.mp3";
             string outputDirectory = @"output";
 
             try
             {
-                (var service, var parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(modelFilePath, outputDirectory);
+                (var service, var parallelOptions) = AudioSeparationFactory.CreateSystemOptimized(InternalModel.Default, outputDirectory);
 
                 service.ProgressChanged += OnProgressChanged;
                 service.ProcessingStarted += OnProcessingStarted;

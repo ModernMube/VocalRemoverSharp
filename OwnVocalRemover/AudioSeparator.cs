@@ -1,13 +1,14 @@
-﻿using System.Numerics;
-using MathNet.Numerics.IntegralTransforms;
+﻿using MathNet.Numerics.IntegralTransforms;
+using Microsoft.Extensions.ObjectPool;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using Ownaudio;
 using Ownaudio.Engines;
 using Ownaudio.Sources;
 using System.Collections.Concurrent;
-using Microsoft.Extensions.ObjectPool;
 using System.Diagnostics;
+using System.Numerics;
+using System.Reflection;
 
 namespace OwnSeparator.Core
 {
@@ -19,7 +20,11 @@ namespace OwnSeparator.Core
         /// <summary>
         /// ONNX model file path
         /// </summary>
-        public string ModelPath { get; set; } = "models/MODERN_INST_DEFAULT.onnx";
+        public string? ModelPath { get; set; }
+        /// <summary>
+        /// Gets or sets the type of separation model used in the operation.
+        /// </summary>
+        public InternalModel Model { get; set; } = InternalModel.Best;
 
         /// <summary>
         /// Output directory path
@@ -173,9 +178,17 @@ namespace OwnSeparator.Core
         public InferenceSession Session { get; }
         public bool IsDispose { get; set; } = false;
 
-        public PooledInferenceSession(string modelPath, SessionOptions options)
+        public PooledInferenceSession(string modelPath, InternalModel model, SessionOptions options)
         {
-            Session = new InferenceSession(modelPath, options);
+            if(File.Exists(modelPath))
+            {
+                Session = new InferenceSession(modelPath, options);
+            }
+            else
+            {
+                var modelBytes = AudioSeparationExtensions.LoadModelBytes(model);
+                Session = new InferenceSession(modelBytes, options);
+            }
         }
 
         public void Dispose()
@@ -195,16 +208,18 @@ namespace OwnSeparator.Core
     {
         private readonly string _modelPath;
         private readonly SessionOptions _sessionOptions;
+        private readonly InternalModel _model;
 
-        public InferenceSessionPoolPolicy(string modelPath, SessionOptions sessionOptions)
+        public InferenceSessionPoolPolicy(string modelPath, InternalModel model, SessionOptions sessionOptions)
         {
             _modelPath = modelPath;
             _sessionOptions = sessionOptions;
+            _model = model;
         }
 
         public PooledInferenceSession Create()
         {
-            return new PooledInferenceSession(_modelPath, _sessionOptions);
+            return new PooledInferenceSession(_modelPath, _model, _sessionOptions);
         }
 
         public bool Return(PooledInferenceSession obj)
@@ -373,7 +388,7 @@ namespace OwnSeparator.Core
         {
             await Task.Run(() =>
             {
-                if (!File.Exists(_options.ModelPath))
+                if (!File.Exists(_options.ModelPath) && _options.Model == InternalModel.None)
                 {
                     throw new FileNotFoundException($"Model file not found: {_options.ModelPath}");
                 }
@@ -394,7 +409,15 @@ namespace OwnSeparator.Core
                     Console.WriteLine("Using CPU execution provider.");
                 }
 
-                _onnxSession = new InferenceSession(_options.ModelPath, sessionOptions);
+                if(File.Exists(_options.ModelPath))
+                {
+                    _onnxSession = new InferenceSession(_options.ModelPath, sessionOptions);
+                }                      
+                else
+                {
+                    var modelBytes = AudioSeparationExtensions.LoadModelBytes(_options.Model);
+                    _onnxSession = new InferenceSession(modelBytes, sessionOptions);
+                }
 
                 // Auto-detect model dimensions
                 AutoDetectModelDimensions();
@@ -416,7 +439,7 @@ namespace OwnSeparator.Core
 
             await Task.Run(() =>
             {
-                if (!File.Exists(_options.ModelPath))
+                if (!File.Exists(_options.ModelPath) && _options.Model == InternalModel.None)
                 {
                     throw new FileNotFoundException($"Model file not found: {_options.ModelPath}");
                 }
@@ -439,7 +462,7 @@ namespace OwnSeparator.Core
                 }
 
                 // Create session pool
-                var poolPolicy = new InferenceSessionPoolPolicy(_options.ModelPath, sessionOptions);
+                var poolPolicy = new InferenceSessionPoolPolicy(_options.ModelPath, _options.Model, sessionOptions);
                 _sessionPool = new DefaultObjectPool<PooledInferenceSession>(
                     poolPolicy, _parallelOptions.SessionPoolSize);
 
@@ -534,7 +557,7 @@ namespace OwnSeparator.Core
 
                 Directory.CreateDirectory(_options.OutputDirectory);
 
-                var modelName = Path.GetFileName(_options.ModelPath).ToUpper();
+                var modelName = Path.GetFileName(_options.ModelPath ?? "").ToUpper();
                 var (vocalsPath, instrumentalPath) = await SaveResultsAsync(
                     filename, vocals, instrumental, statistics.SampleRate, modelName, cancellationToken);
 
@@ -1760,15 +1783,60 @@ namespace OwnSeparator.Core
     public static class AudioSeparationExtensions
     {
         /// <summary>
+        /// Creates a default instance of the <see cref="AudioSeparationService"/> using the specified model path.
+        /// </summary>
+        /// <param name="modelPath">The file path to the model used for audio separation. This must be a valid path to a supported model file.</param>
+        /// <returns>A new instance of <see cref="AudioSeparationService"/> configured with the specified model.</returns>
+        public static AudioSeparationService CreateDefaultService(string modelPath)
+        {
+            return createDefaultService(modelPath, InternalModel.None);
+        }
+
+        /// <summary>
+        /// Creates a default instance of the <see cref="AudioSeparationService"/> using the specified model.
+        /// </summary>
+        /// <param name="_model">The internal model to be used for audio separation. Cannot be null.</param>
+        /// <returns>A new instance of <see cref="AudioSeparationService"/> configured with the specified model.</returns>
+        public static AudioSeparationService CreateDefaultService(InternalModel _model)
+        {
+            return createDefaultService("", _model);
+        }
+
+        /// <summary>
+        /// Creates an instance of the <see cref="AudioSeparationService"/> using the specified model path and output
+        /// directory.
+        /// </summary>
+        /// <param name="_modelPath">The file path to the model used for audio separation. Cannot be null or empty.</param>
+        /// <param name="_output">The directory where the output files will be saved. Cannot be null or empty.</param>
+        /// <returns>An instance of <see cref="AudioSeparationService"/> configured with the specified model and output
+        /// directory.</returns>
+        public static AudioSeparationService CreatetService(string _modelPath, string _output)
+        {
+            return createService(_modelPath, InternalModel.None, _output);
+        }
+
+        /// <summary>
+        /// Creates an instance of the <see cref="AudioSeparationService"/> using the specified model and output path.
+        /// </summary>
+        /// <param name="_model">The internal model to be used for audio separation.</param>
+        /// <param name="_output">The output path where the results of the audio separation will be stored. Cannot be null or empty.</param>
+        /// <returns>An instance of <see cref="AudioSeparationService"/> configured with the specified model and output path.</returns>
+        public static AudioSeparationService CreatetService(InternalModel _model, string _output)
+        {
+            return createService("", _model, _output);
+        }
+
+        /// <summary>
         /// Create service with default options
         /// </summary>
         /// <param name="modelPath">Path to ONNX model file</param>
         /// <returns>Configured AudioSeparationService</returns>
-        public static AudioSeparationService CreateDefaultService(string modelPath)
+        private static AudioSeparationService createDefaultService(string? modelPath, InternalModel inmodel)
         {
             var options = new SeparationOptions
             {
-                ModelPath = modelPath
+                ModelPath = modelPath,
+                Model = inmodel,
             };
             return new AudioSeparationService(options);
         }
@@ -1779,11 +1847,12 @@ namespace OwnSeparator.Core
         /// <param name="modelPath">Path to ONNX model file</param>
         /// <param name="outputDirectory">Output directory path</param>
         /// <returns>Configured AudioSeparationService</returns>
-        public static AudioSeparationService CreateService(string modelPath, string outputDirectory)
+        private static AudioSeparationService createService(string modelPath, InternalModel inmodel, string outputDirectory)
         {
             var options = new SeparationOptions
             {
                 ModelPath = modelPath,
+                Model = inmodel,
                 OutputDirectory = outputDirectory
             };
             return new AudioSeparationService(options);
@@ -1822,6 +1891,49 @@ namespace OwnSeparator.Core
             var estimatedMinutes = fileSizeMB * 1.5;
             return TimeSpan.FromMinutes(Math.Max(0.5, estimatedMinutes));
         }
+
+        /// <summary>
+        /// Loads the model data as a byte array from the embedded resource.
+        /// </summary>
+        /// <remarks>This method retrieves the model file from the assembly's embedded resources using the
+        /// specified resource name. The resource name is matched against the assembly's manifest resource names, and
+        /// the corresponding resource is loaded.</remarks>
+        /// <param name="_model">The internal model instance used to determine the resource to load. This parameter is currently unused.</param>
+        /// <returns>A byte array containing the model data extracted from the embedded resource.</returns>
+        public static byte[] LoadModelBytes(InternalModel _model)
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            string? resourceName = "";
+
+            switch (_model)
+            {
+                case InternalModel.None:
+                    throw new InvalidOperationException("Model is not set. Please initialize the model first.");
+                case InternalModel.Default:
+                    resourceName = "default.onnx";
+                    break;
+                case InternalModel.Best:
+                    resourceName = "best.onnx";
+                    break;
+                case InternalModel.Karaoke:
+                    resourceName = "karaoke.onnx";
+                    break;
+            }
+
+            foreach (var name in assembly.GetManifestResourceNames())
+            {
+                if (name.EndsWith(resourceName))
+                {
+                    resourceName = name;
+                    break;
+                }
+            }
+
+            using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+            using var memoryStream = new MemoryStream();
+            stream.CopyTo(memoryStream);
+            return memoryStream.ToArray();
+        }
     }
 
     /// <summary>
@@ -1830,17 +1942,119 @@ namespace OwnSeparator.Core
     public static class AudioSeparationFactory
     {
         /// <summary>
+        /// Creates an instance of <see cref="AudioSeparationService"/> optimized for mobile environments.
+        /// </summary>
+        /// <param name="modelPath">The file path to the model used for audio separation. Must be a valid, accessible path.</param>
+        /// <param name="outputDirectory">The directory where output files will be stored. Must be writable.</param>
+        /// <param name="disableNoiseReduction">A value indicating whether noise reduction should be disabled.</param>
+        /// <returns>An instance of <see cref="AudioSeparationService"/> configured for mobile optimization.</returns>
+        public static AudioSeparationService CreateMobileOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = false)
+        {
+            return createMobileOptimized(modelPath, InternalModel.None, outputDirectory, disableNoiseReduction);
+        }
+
+        /// <summary>
+        /// Creates an instance of <see cref="AudioSeparationService"/> optimized for mobile environments.
+        /// </summary>
+        /// <param name="model">The internal model used for audio separation. This parameter cannot be null.</param>
+        /// <param name="outputDirectory">The directory where output files will be stored. This parameter cannot be null or empty.</param>
+        /// <param name="disableNoiseReduction">A value indicating whether noise reduction should be disabled.</param>
+        /// <returns>An instance of <see cref="AudioSeparationService"/> configured for mobile optimization.</returns>
+        public static AudioSeparationService CreateMobileOptimized(InternalModel model, string outputDirectory, bool disableNoiseReduction = false)
+        {
+            return createMobileOptimized("", model, outputDirectory, disableNoiseReduction);
+        }
+
+        /// <summary>
+        /// Creates an instance of <see cref="AudioSeparationService"/> optimized for desktop environments.
+        /// </summary>
+        /// <param name="modelPath">The file path to the model used for audio separation. This must be a valid path to an existing model file.</param>
+        /// <param name="outputDirectory">The directory where output files will be saved. This must be a valid, writable directory.</param>
+        /// <param name="disableNoiseReduction">A value indicating whether noise reduction should be disabled.</param>
+        /// <returns>An instance of <see cref="AudioSeparationService"/> configured for desktop use.</returns>
+        public static AudioSeparationService CreateDesktopOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = false)
+        {
+            return createDesktopOptimized(modelPath, InternalModel.None, outputDirectory, disableNoiseReduction);
+        }
+
+        /// <summary>
+        /// Creates an instance of <see cref="AudioSeparationService"/> optimized for desktop environments.
+        /// </summary>
+        /// <param name="model">The internal model used for audio separation. This parameter cannot be null.</param>
+        /// <param name="outputDirectory">The directory where output files will be saved. This parameter cannot be null or empty.</param>
+        /// <param name="disableNoiseReduction">A value indicating whether noise reduction should be disabled.  <see langword="true"/> to disable noise
+        /// reduction; otherwise, <see langword="false"/>.</param>
+        /// <returns>An instance of <see cref="AudioSeparationService"/> configured for desktop optimization.</returns>
+        public static AudioSeparationService CreateDesktopOptimized(InternalModel model, string outputDirectory, bool disableNoiseReduction = false)
+        {
+            return createDesktopOptimized("", model, outputDirectory, disableNoiseReduction);
+        }
+
+        /// <summary>
+        /// Creates an instance of <see cref="AudioSeparationService"/> optimized for batch processing.
+        /// </summary>
+        /// <param name="modelPath">The file path to the model used for audio separation. Must be a valid, non-empty string.</param>
+        /// <param name="outputDirectory">The directory where the separated audio files will be saved. Must be a valid, writable directory path.</param>
+        /// <param name="disableNoiseReduction">A value indicating whether noise reduction should be disabled during audio separation. <see
+        /// langword="true"/> to disable noise reduction; otherwise, <see langword="false"/>.</param>
+        /// <returns>An instance of <see cref="AudioSeparationService"/> configured for batch processing.</returns>
+        public static AudioSeparationService CreateBatchOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = true)
+        {
+            return createBatchOptimized(modelPath, InternalModel.None, outputDirectory, disableNoiseReduction);
+        }
+
+        /// <summary>
+        /// Creates an instance of <see cref="AudioSeparationService"/> optimized for batch processing.
+        /// </summary>
+        /// <param name="model">The internal model used for audio separation. This parameter cannot be null.</param>
+        /// <param name="outputDirectory">The directory where the processed audio files will be saved. This parameter cannot be null or empty.</param>
+        /// <param name="disableNoiseReduction">A value indicating whether noise reduction should be disabled during audio separation. <see
+        /// langword="true"/> to disable noise reduction; otherwise, <see langword="false"/>.</param>
+        /// <returns>An instance of <see cref="AudioSeparationService"/> configured for batch processing.</returns>
+        public static AudioSeparationService CreateBatchOptimized(InternalModel model, string outputDirectory, bool disableNoiseReduction = true)
+        {
+            return createBatchOptimized("", model, outputDirectory, disableNoiseReduction);
+        }
+
+        /// <summary>
+        /// Creates an optimized audio separation system configured for the current environment.
+        /// </summary>
+        /// <param name="modelPath">The file path to the model used for audio separation. Must be a valid, accessible path.</param>
+        /// <param name="outputDirectory">The directory where output files will be stored. Must be a valid, writable path.</param>
+        /// <returns>A tuple containing the initialized <see cref="AudioSeparationService"/> instance and the associated  <see
+        /// cref="ParallelProcessingOptions"/> for optimized processing.</returns>
+        public static (AudioSeparationService service, ParallelProcessingOptions parallelOptions) CreateSystemOptimized(
+            string modelPath, string outputDirectory)
+        {
+            return createSystemOptimized(modelPath, InternalModel.None, outputDirectory);
+        }
+
+        /// <summary>
+        /// Creates an optimized audio separation system configured for the current environment.
+        /// </summary>
+        /// <param name="model">The internal model used to configure the audio separation service. Cannot be null.</param>
+        /// <param name="outputDirectory">The directory where output files will be stored. Must be a valid, writable path.</param>
+        /// <returns>A tuple containing the configured <see cref="AudioSeparationService"/> instance and  <see
+        /// cref="ParallelProcessingOptions"/> optimized for the system.</returns>
+        public static (AudioSeparationService service, ParallelProcessingOptions parallelOptions) CreateSystemOptimized(
+            InternalModel model, string outputDirectory)
+        {
+            return createSystemOptimized("", model, outputDirectory);
+        }
+
+        /// <summary>
         /// Create service optimized for mobile devices (faster processing)
         /// </summary>
         /// <param name="modelPath">Path to ONNX model file</param>
         /// <param name="outputDirectory">Output directory path</param>
         /// <param name="disableNoiseReduction">Whether to disable noise reduction for speed</param>
         /// <returns>Mobile-optimized AudioSeparationService</returns>
-        public static AudioSeparationService CreateMobileOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = false)
+        private static AudioSeparationService createMobileOptimized(string modelPath, InternalModel model, string outputDirectory, bool disableNoiseReduction = false)
         {
             var options = new SeparationOptions
             {
                 ModelPath = modelPath,
+                Model = model,
                 OutputDirectory = outputDirectory,
                 DisableNoiseReduction = disableNoiseReduction,
                 ChunkSizeSeconds = 10, // Smaller chunks for mobile
@@ -1859,11 +2073,12 @@ namespace OwnSeparator.Core
         /// <param name="outputDirectory">Output directory path</param>
         /// <param name="disableNoiseReduction">Whether to disable noise reduction</param>
         /// <returns>Desktop-optimized AudioSeparationService</returns>
-        public static AudioSeparationService CreateDesktopOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = false)
+        private static AudioSeparationService createDesktopOptimized(string modelPath, InternalModel model, string outputDirectory, bool disableNoiseReduction = false)
         {
             var options = new SeparationOptions
             {
                 ModelPath = modelPath,
+                Model = model,
                 OutputDirectory = outputDirectory,
                 ChunkSizeSeconds = 20, // Larger chunks for better quality
                 Margin = 88200,        // Larger margin
@@ -1882,11 +2097,12 @@ namespace OwnSeparator.Core
         /// <param name="outputDirectory">Output directory path</param>
         /// <param name="disableNoiseReduction">Whether to disable noise reduction for faster batch processing</param>
         /// <returns>Batch-optimized AudioSeparationService</returns>
-        public static AudioSeparationService CreateBatchOptimized(string modelPath, string outputDirectory, bool disableNoiseReduction = true)
+        private static AudioSeparationService createBatchOptimized(string modelPath, InternalModel model, string outputDirectory, bool disableNoiseReduction = true)
         {
             var options = new SeparationOptions
             {
                 ModelPath = modelPath,
+                Model = model,
                 OutputDirectory = outputDirectory,
                 ChunkSizeSeconds = 15, // Balanced chunk size
                 Margin = 44100,        // Standard margin
@@ -1906,8 +2122,8 @@ namespace OwnSeparator.Core
         /// <param name="systemCores">Number of CPU cores</param>
         /// <param name="availableMemoryGB">Available memory in GB</param>
         /// <returns>System-optimized AudioSeparationService with parallel options</returns>
-        public static (AudioSeparationService service, ParallelProcessingOptions parallelOptions) CreateSystemOptimized(
-            string modelPath, string outputDirectory)
+        private static (AudioSeparationService service, ParallelProcessingOptions parallelOptions) createSystemOptimized(
+            string modelPath, InternalModel model, string outputDirectory)
         {
             SeparationOptions separationOptions;
             ParallelProcessingOptions parallelOptions;
@@ -1924,6 +2140,7 @@ namespace OwnSeparator.Core
                 separationOptions = new SeparationOptions
                 {
                     ModelPath = modelPath,
+                    Model = model,
                     OutputDirectory = outputDirectory,
                     ChunkSizeSeconds = 25,
                     Margin = 88200,
@@ -1947,6 +2164,7 @@ namespace OwnSeparator.Core
                 separationOptions = new SeparationOptions
                 {
                     ModelPath = modelPath,
+                    Model = model,
                     OutputDirectory = outputDirectory,
                     ChunkSizeSeconds = 20,
                     Margin = 44100,
@@ -1970,6 +2188,7 @@ namespace OwnSeparator.Core
                 separationOptions = new SeparationOptions
                 {
                     ModelPath = modelPath,
+                    Model = model,
                     OutputDirectory = outputDirectory,
                     ChunkSizeSeconds = 15,
                     Margin = 44100,
@@ -1993,6 +2212,7 @@ namespace OwnSeparator.Core
                 separationOptions = new SeparationOptions
                 {
                     ModelPath = modelPath,
+                    Model = model,
                     OutputDirectory = outputDirectory,
                     ChunkSizeSeconds = 10,
                     Margin = 22050,
@@ -2049,5 +2269,16 @@ namespace OwnSeparator.Core
         public bool Is64Bit { get; set; }
         public bool HasHighMemory { get; set; }
         public bool HasManyCores { get; set; }
+    }
+
+    /// <summary>
+    /// Represents the type of model used in a specific operation or context.
+    /// </summary>
+    public enum InternalModel
+    {
+        None,
+        Default,
+        Best,
+        Karaoke
     }
 }

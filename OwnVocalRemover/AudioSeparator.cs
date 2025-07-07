@@ -558,6 +558,8 @@ namespace OwnSeparator.Core
                 Directory.CreateDirectory(_options.OutputDirectory);
 
                 var modelName = Path.GetFileName(_options.ModelPath ?? "").ToUpper();
+                if (modelName == "")
+                    modelName = _options.Model.ToString().ToUpper();
                 var (vocalsPath, instrumentalPath) = await SaveResultsAsync(
                     filename, vocals, instrumental, statistics.SampleRate, modelName, cancellationToken);
 
@@ -1639,7 +1641,7 @@ namespace OwnSeparator.Core
                 var instrumentalPath = Path.Combine(_options.OutputDirectory, $"{filename}_music.wav");
 
                 // Python model-specific logic reproduction
-                if (modelName != "OWN_INST_DEFAULT.ONNX")
+                if (modelName.CompareTo("DEFAULT") < 0)
                 {
                     SaveAudio(instrumentalPath, instrumental, sampleRate);
                     SaveAudio(vocalsPath, vocals, sampleRate);
